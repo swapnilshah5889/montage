@@ -30,7 +30,7 @@ ApplicationWindow {
     palette.toolTipBase: Theme.panelAlt
     palette.toolTipText: Theme.text
 
-    readonly property bool editingText: activeFocusItem instanceof TextInput
+    readonly property bool editingText: activeFocusItem instanceof TextInput || activeFocusItem instanceof TextEdit
 
     function save() {
         if (Project.fileUrl.toString() === "") saveDialog.open()
@@ -81,24 +81,68 @@ ApplicationWindow {
                 color: SplitHandle.pressed || SplitHandle.hovered ? Theme.accent : Theme.bg
             }
 
-            MediaPanel {
-                SplitView.preferredWidth: 320
-                SplitView.minimumWidth: 220
+            ChatPanel {
+                SplitView.preferredWidth: 400
+                SplitView.minimumWidth: 300
+                onSettingsRequested: modelSettings.open()
                 onImportRequested: importDialog.open()
             }
             PlayerPanel {
                 SplitView.fillWidth: true
                 SplitView.minimumWidth: 380
             }
-            InspectorPanel {
-                SplitView.preferredWidth: 290
+            ColumnLayout {
+                SplitView.preferredWidth: 300
                 SplitView.minimumWidth: 230
+                spacing: 0
+                TabBar {
+                    id: sideTabs
+                    Layout.fillWidth: true
+                    background: Rectangle { color: Theme.panel }
+                    Repeater {
+                        model: ["Media", "Edit"]
+                        TabButton {
+                            id: tab
+                            required property string modelData
+                            text: modelData
+                            focusPolicy: Qt.NoFocus
+                            contentItem: Label {
+                                text: tab.text
+                                horizontalAlignment: Text.AlignHCenter
+                                color: tab.checked ? Theme.text : Theme.textDim
+                                font.bold: tab.checked
+                            }
+                            background: Rectangle {
+                                implicitHeight: 36
+                                color: tab.checked ? Theme.panel : Theme.bg
+                                Rectangle {
+                                    visible: tab.checked
+                                    anchors.bottom: parent.bottom
+                                    width: parent.width
+                                    height: 2
+                                    color: Theme.accent
+                                }
+                            }
+                        }
+                    }
+                }
+                StackLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    currentIndex: sideTabs.currentIndex
+                    MediaPanel { onImportRequested: importDialog.open() }
+                    InspectorPanel {}
+                }
+                Connections {
+                    target: Project
+                    function onSelectionChanged() { if (Project.selectedId !== "") sideTabs.currentIndex = 1 }
+                }
             }
         }
 
         TimelinePanel {
-            SplitView.preferredHeight: 340
-            SplitView.minimumHeight: 200
+            SplitView.preferredHeight: 280
+            SplitView.minimumHeight: 180
         }
     }
 
@@ -152,6 +196,8 @@ ApplicationWindow {
             Exporter.start(selectedFile)
         }
     }
+
+    ModelSettings { id: modelSettings }
 
     Popup {
         id: exportPopup

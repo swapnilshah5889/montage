@@ -130,6 +130,16 @@ int main(int argc, char **argv)
     CHECK(qFuzzyCompare(p.draft().segment(ov1)->opacity, 1.0));
     p.redo();
 
+    // "Original" follows the first video, not a photo/logo at the start.
+    {
+        Project q(&app);
+        q.importFiles({QUrl::fromLocalFile(media.filePath("photo.png")), QUrl::fromLocalFile(media.filePath("clipB.mov"))});
+        q.addToTimeline(materialId(q, "photo.png"));
+        CHECK(q.canvasWidth() >= 1080 && q.canvasHeight() >= 1080);  // small photo alone: at least 1080 on the short side
+        q.addToTimeline(materialId(q, "clipB.mov"));
+        CHECK(q.canvasWidth() == 1920 && q.canvasHeight() == 1080);  // 720p video, scaled to 1080 on the short side
+    }
+
     // Fixed aspect ratio
     p.setAspect("9:16");
     CHECK(p.canvasWidth() == 1080 && p.canvasHeight() == 1920 && p.aspect() == "9:16");
@@ -143,6 +153,36 @@ int main(int argc, char **argv)
     CHECK(q.load(file));
     CHECK(q.draft().toJson() == saved);
     CHECK(!q.dirty() && !q.canUndo());
+
+    // Text clips: overlay placement, presets, split keeps the style, JSON round trip.
+    const QString title = p.addText("Hello\nworld", 500'000, 0, "caption");
+    const Track *titleTrack = nullptr;
+    const Segment *titleSeg = p.draft().segment(title, &titleTrack);
+    CHECK(titleSeg && titleTrack->role == TrackRole::Overlay);
+    CHECK(titleSeg->duration == kTextDefaultUs && !titleSeg->text.background.isEmpty());
+    CHECK(p.materials().size() == 4);  // the built-in text material stays out of the media bin
+    p.setTextProperty(title, "color", "#FFD60A");
+    p.applyTextPreset(title, "title");
+    CHECK(p.draft().segment(title)->text.text == "Hello\nworld");
+    CHECK(p.draft().segment(title)->text.background.isEmpty());
+    CHECK(p.draft().segment(title)->text.color == "#ffffff");
+    p.setSelectedId(title);
+    CHECK(p.splitAt(2'000'000));
+    CHECK(p.draft().segment(p.selectedId())->text.text == "Hello\nworld");
+    p.moveSegment(title, p.draft().tracks[0].id, 0);  // text can't go on the main track
+    p.draft().segment(title, &titleTrack);
+    CHECK(titleTrack->role == TrackRole::Overlay);
+    CHECK(Draft::fromJson(p.draft().toJson()).toJson() == p.draft().toJson());
+
+    // An undo group turns many edits into one step.
+    const QJsonObject beforeGroup = p.draft().toJson();
+    p.beginUndoGroup();
+    p.addText("one", 0);
+    p.addText("two", 4'000'000);
+    p.setAspect("1:1");
+    p.endUndoGroup();
+    p.undo();
+    CHECK(p.draft().toJson() == beforeGroup);
 
     // Delete
     p.setSelectedId(segB);

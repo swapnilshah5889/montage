@@ -11,13 +11,15 @@
 
 namespace mtg {
 
-enum class MaterialKind { Video, Audio, Image };
+enum class MaterialKind { Video, Audio, Image, Text };
 enum class TrackRole { Main, Overlay, Audio };
 
 QString kindName(MaterialKind k);
 QString roleName(TrackRole r);
 
 constexpr qint64 kImageDefaultUs = 5'000'000;
+constexpr qint64 kTextDefaultUs = 3'000'000;
+inline const QString kTextMaterialId = QStringLiteral("text");
 constexpr qint64 kMinSegmentUs = 100'000;
 
 struct Material {
@@ -34,7 +36,23 @@ struct Material {
     QString thumbnail;      // cached PNG
 
     bool isVisual() const { return kind != MaterialKind::Audio; }
-    bool isTimed() const { return kind != MaterialKind::Image; }
+    bool isTimed() const { return kind == MaterialKind::Video || kind == MaterialKind::Audio; }
+};
+
+// Styling for text clips. Sizes are relative to the canvas so text keeps
+// its look at any resolution.
+struct TextStyle {
+    QString text;
+    QString font = QStringLiteral("Helvetica Neue");
+    double size = 0.08;      // font size as a fraction of the canvas's shorter side
+    QString color = QStringLiteral("#ffffff");
+    bool bold = true;
+    double outline = 0.0;    // outline width as a fraction of the font size
+    QString outlineColor = QStringLiteral("#000000");
+    QString background;      // box colour behind the text; empty = none
+    QString align = QStringLiteral("center");  // left | center | right
+
+    bool operator==(const TextStyle &) const = default;
 };
 
 struct Transform {
@@ -52,6 +70,7 @@ struct Segment {
     double volume = 1.0;
     double opacity = 1.0;
     Transform transform;
+    TextStyle text;          // used when the material is the text material
 
     qint64 end() const { return start + duration; }
     bool contains(qint64 t) const { return t >= start && t < end(); }
@@ -70,7 +89,12 @@ struct Canvas {
     int width = 1920;
     int height = 1080;
     double fps = 30;
+    QString background = QStringLiteral("#000000");  // shows wherever no clip covers the frame
 };
+
+// Applies a named text preset (title, subtitle, caption, lower-third,
+// end-card): style and position. Keeps the text. False for unknown names.
+bool applyTextPreset(const QString &name, TextStyle *style, Transform *transform);
 
 struct Draft {
     QString name = QStringLiteral("Untitled");
@@ -87,6 +111,9 @@ struct Draft {
     Segment *segment(const QString &id, Track **owner = nullptr);
     const Segment *segment(const QString &id, const Track **owner = nullptr) const;
     Track &mainTrack() { return tracks[0]; }
+
+    // Text clips share one built-in material; this adds it on first use.
+    void ensureTextMaterial();
 
     // Re-establish invariants after an edit: the main track is magnetic
     // (no gaps), other tracks are sorted, and empty extra tracks go away.

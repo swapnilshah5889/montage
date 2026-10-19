@@ -65,7 +65,7 @@ Rectangle {
         y: 4
         visible: item.width > 34
         width: Math.min(implicitWidth, item.width - 16)
-        text: (item.seg.kind === "audio" ? "♪ " : "") + item.seg.name + "   " + Project.formatTime(item.seg.duration, false)
+        text: (item.seg.kind === "audio" ? "♪ " : item.seg.kind === "text" ? "T  " : "") + item.seg.name + "   " + Project.formatTime(item.seg.duration, false)
         elide: Text.ElideRight
         color: "white"
         font.pixelSize: 11
@@ -141,7 +141,7 @@ Rectangle {
             const t = item.timeline
             const s = item.seg
             const dx = mapToItem(t, m.x, 0).x - startX
-            const minStart = s.kind === "image" ? -1e15 : s.start - s.sourceStart
+            const minStart = (s.kind === "image" || s.kind === "text") ? -1e15 : s.start - s.sourceStart
             let start = t.snapEdge(s.start + dx * t.usPerPx, s.id)
             start = Math.max(minStart, Math.min(start, s.start + s.duration - 100000))
             item.trimL = t.xOf(start - s.start)
@@ -172,7 +172,7 @@ Rectangle {
             const t = item.timeline
             const s = item.seg
             const dx = mapToItem(t, m.x, 0).x - startX
-            const maxEnd = s.kind === "image" ? 1e15 : s.start + (s.materialDuration - s.sourceStart)
+            const maxEnd = (s.kind === "image" || s.kind === "text") ? 1e15 : s.start + (s.materialDuration - s.sourceStart)
             let end = t.snapEdge(s.start + s.duration + dx * t.usPerPx, s.id)
             end = Math.min(maxEnd, Math.max(end, s.start + 100000))
             item.trimR = t.xOf(end - (s.start + s.duration))

@@ -71,6 +71,105 @@ Rectangle {
             }
 
             ColumnLayout {
+                visible: panel.has && panel.sel.kind === "text"
+                Layout.fillWidth: true
+                spacing: 8
+                SectionTitle { text: "Text" }
+
+                TextArea {
+                    id: textEdit
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.max(64, contentHeight + 20)
+                    wrapMode: TextEdit.Wrap
+                    color: Theme.text
+                    placeholderText: "Type your text"
+                    background: Rectangle { radius: 6; color: Theme.panelAlt; border.color: textEdit.activeFocus ? Theme.accent : Theme.border }
+                    onEditingFinished: if (panel.has && text !== panel.sel.text) Project.setTextProperty(panel.sel.id, "text", text)
+                    Binding on text {
+                        when: !textEdit.activeFocus
+                        value: panel.has && panel.sel.text !== undefined ? panel.sel.text : ""
+                    }
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Repeater {
+                        model: Project.textPresets()
+                        FlatButton {
+                            required property string modelData
+                            text: modelData
+                            font.pixelSize: 11
+                            background: Rectangle { implicitHeight: 26; radius: 5; color: parent.hovered ? "#34343a" : Theme.panelAlt }
+                            onClicked: Project.applyTextPreset(panel.sel.id, modelData)
+                        }
+                    }
+                }
+
+                PropertySlider {
+                    label: "Size"; unit: "%"; from: 2; to: 30; resetValue: 8
+                    value: panel.has && panel.sel.textSize !== undefined ? panel.sel.textSize * 100 : 8
+                    onMoved: (v) => Project.setTextProperty(panel.sel.id, "size", v / 100, false)
+                    onCommitted: (v) => Project.setTextProperty(panel.sel.id, "size", v / 100, true)
+                }
+
+                Row {
+                    spacing: 6
+                    Repeater {
+                        model: ["#FFFFFF", "#000000", "#1FD1C1", "#FFD60A", "#FF453A", "#0A84FF", "#FF2D92"]
+                        Rectangle {
+                            required property string modelData
+                            width: 24; height: 24; radius: 12
+                            color: modelData
+                            border.width: panel.has && String(panel.sel.color).toUpperCase() === modelData ? 2 : 1
+                            border.color: panel.has && String(panel.sel.color).toUpperCase() === modelData ? Theme.accent : Theme.border
+                            TapHandler { onTapped: Project.setTextProperty(panel.sel.id, "color", parent.modelData) }
+                        }
+                    }
+                }
+
+                RowLayout {
+                    spacing: 10
+                    CheckBox {
+                        text: "Bold"
+                        focusPolicy: Qt.NoFocus
+                        checked: panel.has && panel.sel.bold === true
+                        onToggled: Project.setTextProperty(panel.sel.id, "bold", checked)
+                    }
+                    CheckBox {
+                        text: "Outline"
+                        focusPolicy: Qt.NoFocus
+                        checked: panel.has && panel.sel.outline > 0
+                        onToggled: Project.setTextProperty(panel.sel.id, "outline", checked ? 0.05 : 0)
+                    }
+                    CheckBox {
+                        text: "Box"
+                        focusPolicy: Qt.NoFocus
+                        checked: panel.has && panel.sel.background !== undefined && panel.sel.background !== ""
+                        onToggled: Project.setTextProperty(panel.sel.id, "background", checked ? "#B3000000" : "")
+                    }
+                }
+
+                RowLayout {
+                    spacing: 4
+                    Label { text: "Align"; color: Theme.textDim; font.pixelSize: 12; Layout.fillWidth: true }
+                    Repeater {
+                        model: ["left", "center", "right"]
+                        FlatButton {
+                            required property string modelData
+                            text: modelData === "left" ? "Left" : modelData === "center" ? "Center" : "Right"
+                            font.pixelSize: 11
+                            background: Rectangle {
+                                implicitHeight: 26; radius: 5
+                                color: panel.has && panel.sel.align === parent.modelData ? "#2f4f4c" : Theme.panelAlt
+                            }
+                            onClicked: Project.setTextProperty(panel.sel.id, "align", modelData)
+                        }
+                    }
+                }
+            }
+
+            ColumnLayout {
                 visible: panel.has && panel.sel.kind !== "audio"
                 Layout.fillWidth: true
                 spacing: 6

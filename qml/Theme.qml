@@ -13,12 +13,13 @@ QtObject {
     readonly property color video: "#24617d"
     readonly property color image: "#6a4796"
     readonly property color audio: "#2b7148"
+    readonly property color textClip: "#9a6a12"
     readonly property color lane: "#18181b"
     readonly property color mainLane: "#1e2126"
     readonly property color playhead: "#ffffff"
     readonly property int radius: 6
 
     function kindColor(kind) {
-        return kind === "audio" ? audio : kind === "image" ? image : video
+        return kind === "audio" ? audio : kind === "image" ? image : kind === "text" ? textClip : video
     }
 }

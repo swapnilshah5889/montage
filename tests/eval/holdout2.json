@@ -1,0 +1,223 @@
+{
+  "about": "Second held-out set, written 2026-10-19 after the first hold-out set was used for debugging. Run once per prompt or guard change; don't tune against it.",
+  "cases": [
+    {
+      "name": "two-clips-8s",
+      "media": [
+        "forest.mp4",
+        "beach.mp4"
+      ],
+      "requests": [
+        "Make an 8 second video with the beach and then the forest"
+      ],
+      "checks": [
+        {
+          "type": "length",
+          "min": 7.6,
+          "max": 8.4
+        },
+        {
+          "type": "main_order",
+          "media": [
+            "beach.mp4",
+            "forest.mp4"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "caption-middle",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m3",
+            "from": 0,
+            "to": 4
+          }
+        ]
+      },
+      "requests": [
+        "Add a caption \"Look at this\" from second 4 to second 8"
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "Look at this"
+        },
+        {
+          "type": "main_count",
+          "min": 3,
+          "max": 3
+        },
+        {
+          "type": "length",
+          "min": 11.9,
+          "max": 12.1
+        }
+      ]
+    },
+    {
+      "name": "louder-music",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "song.mp3"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ],
+        "audio": [
+          {
+            "media": "m3",
+            "at": 0,
+            "from": 0,
+            "to": 10,
+            "volume": 0.2
+          }
+        ]
+      },
+      "requests": [
+        "make the music louder"
+      ],
+      "checks": [
+        {
+          "type": "audio",
+          "media": "song.mp3",
+          "min_volume": 0.3
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        }
+      ]
+    },
+    {
+      "name": "square-shorter",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m3",
+            "from": 0,
+            "to": 4
+          }
+        ]
+      },
+      "requests": [
+        "make it square and shorter, about 6 seconds"
+      ],
+      "checks": [
+        {
+          "type": "aspect",
+          "value": "1:1"
+        },
+        {
+          "type": "length",
+          "min": 5.5,
+          "max": 6.5
+        }
+      ]
+    },
+    {
+      "name": "announcement-empty",
+      "media": [],
+      "requests": [
+        "Create a 5 second announcement: \"Sale ends Friday\""
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "Sale ends Friday"
+        },
+        {
+          "type": "length",
+          "min": 4.5,
+          "max": 5.5
+        }
+      ]
+    },
+    {
+      "name": "logo-end",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "logo.png"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "add the logo at the end for 2 seconds"
+      ],
+      "checks": [
+        {
+          "type": "media_used",
+          "media": "logo.png"
+        },
+        {
+          "type": "main_count",
+          "min": 2
+        },
+        {
+          "type": "media_used",
+          "media": "beach.mp4"
+        },
+        {
+          "type": "media_used",
+          "media": "city.mov"
+        }
+      ]
+    }
+  ]
+}
