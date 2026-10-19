@@ -38,10 +38,11 @@ void insertOnMain(Draft &d, Segment seg, qint64 at)
 QVariantMap segmentMap(const Draft &d, const Segment &s)
 {
     const Material *m = d.material(s.materialId);
-    return {
+    const bool isText = m && m->kind == MaterialKind::Text;
+    QVariantMap map{
         {"id", s.id},
         {"materialId", s.materialId},
-        {"name", m ? m->name : QString()},
+        {"name", isText ? s.text.text.section(QLatin1Char('\n'), 0, 0) : m ? m->name : QString()},
         {"kind", m ? kindName(m->kind) : QString()},
         {"thumbnail", m && !m->thumbnail.isEmpty() ? QUrl::fromLocalFile(m->thumbnail).toString() : QString()},
         {"hasAudio", m && m->hasAudio},
@@ -57,7 +58,20 @@ QVariantMap segmentMap(const Draft &d, const Segment &s)
         {"y", s.transform.y},
         {"scale", s.transform.scale},
     };
+    if (isText) {
+        map.insert("text", s.text.text);
+        map.insert("font", s.text.font);
+        map.insert("textSize", s.text.size);
+        map.insert("color", s.text.color);
+        map.insert("bold", s.text.bold);
+        map.insert("outline", s.text.outline);
+        map.insert("outlineColor", s.text.outlineColor);
+        map.insert("background", s.text.background);
+        map.insert("align", s.text.align);
+    }
+    return map;
 }
+
 
 }  // namespace
 
@@ -90,7 +104,8 @@ bool Project::edit(F &&fn)
         notify();
         return false;
     }
-    m_undo.append(base);
+    if (m_groupDepth == 0 || !m_groupPushed) m_undo.append(base);
+    if (m_groupDepth > 0) m_groupPushed = true;
     if (m_undo.size() > 200) m_undo.removeFirst();
     m_redo.clear();
     m_liveEditBase.reset();
@@ -110,12 +125,24 @@ void Project::notify()
 void Project::applyCanvasFromFirstClip(Draft &d) const
 {
     if (d.canvasLocked || d.mainTrack().segments.isEmpty()) return;
-    const Material *m = d.material(d.mainTrack().segments.first().materialId);
-    if (!m || m->width <= 0 || m->height <= 0) return;
-    // Keep the clip's shape, capped at 4K on the long side.
-    const QSize s = QSize(m->width, m->height).scaled(3840, 3840, Qt::KeepAspectRatio);
-    const QSize clip(m->width, m->height);
-    const QSize use = (clip.width() <= 3840 && clip.height() <= 3840) ? clip : s;
+    // Follow the first video; a logo or photo at the start shouldn't set the
+    // shape (or a tiny resolution) for the whole film.
+    const Material *m = nullptr;
+    for (const Segment &s : d.mainTrack().segments) {
+        const Material *candidate = d.material(s.materialId);
+        if (candidate && candidate->width > 0 && candidate->height > 0) {
+            if (!m) m = candidate;
+            if (candidate->kind == MaterialKind::Video) {
+                m = candidate;
+                break;
+            }
+        }
+    }
+    if (!m) return;
+    // Keep the clip's shape: at least 1080 on the short side, at most 4K on the long side.
+    QSize use(m->width, m->height);
+    if (std::min(use.width(), use.height()) < 1080) use = use * (1080.0 / std::min(use.width(), use.height()));
+    if (std::max(use.width(), use.height()) > 3840) use = use.scaled(3840, 3840, Qt::KeepAspectRatio);
     d.canvas.width = std::max(2, use.width() & ~1);
     d.canvas.height = std::max(2, use.height() & ~1);
     if (m->fps >= 10 && m->fps <= 120) d.canvas.fps = std::round(m->fps * 1000) / 1000;
@@ -145,6 +172,7 @@ QVariantList Project::materials() const
 
     QVariantList out;
     for (const Material &m : m_draft.materials) {
+        if (m.kind == MaterialKind::Text) continue;
         out.append(QVariantMap{
             {"id", m.id},
             {"kind", kindName(m.kind)},
@@ -312,6 +340,7 @@ void Project::moveSegment(const QString &segmentId, const QString &trackId, qint
             if (target && target->role != TrackRole::Audio) target = nullptr;
         } else if (target) {
             if (target->role == TrackRole::Audio) return false;  // pictures don't go on audio tracks
+            if (m->kind == MaterialKind::Text && target->role == TrackRole::Main) return false;
             role = target->role;
         } else if (trackId == QLatin1String("new-overlay")) {
             role = TrackRole::Overlay;
@@ -420,15 +449,15 @@ static void applyProperty(Segment &s, const QString &key, double v)
     else if (key == QLatin1String("scale")) s.transform.scale = std::clamp(v, 0.05, 8.0);
 }
 
-void Project::setSegmentProperty(const QString &segmentId, const QString &key, double value, bool commit)
+template <typename F>
+void Project::liveOrCommit(const QString &segmentId, bool commit, F &&apply)
 {
     if (!commit) {
         if (!std::as_const(m_draft).segment(segmentId)) return;
         // Snapshot before taking a mutable pointer: the copy shares storage,
         // and the pointer must come from m_draft after it detaches.
         if (!m_liveEditBase) m_liveEditBase = m_draft;
-        Segment *s = m_draft.segment(segmentId);
-        applyProperty(*s, key, value);
+        apply(*m_draft.segment(segmentId));
         m_dirty = true;
         emit selectionChanged();
         emit liveChanged();
@@ -437,9 +466,87 @@ void Project::setSegmentProperty(const QString &segmentId, const QString &key, d
     edit([&](Draft &d) {
         Segment *s = d.segment(segmentId);
         if (!s) return false;
-        applyProperty(*s, key, value);
+        apply(*s);
         return true;
     });
+}
+
+void Project::setSegmentProperty(const QString &segmentId, const QString &key, double value, bool commit)
+{
+    liveOrCommit(segmentId, commit, [&](Segment &s) { applyProperty(s, key, value); });
+}
+
+static void applyTextProperty(Segment &s, const QString &key, const QVariant &v)
+{
+    TextStyle &t = s.text;
+    if (key == QLatin1String("text")) t.text = v.toString();
+    else if (key == QLatin1String("font")) t.font = v.toString();
+    else if (key == QLatin1String("size")) t.size = std::clamp(v.toDouble(), 0.01, 0.5);
+    else if (key == QLatin1String("color")) t.color = v.toString();
+    else if (key == QLatin1String("bold")) t.bold = v.toBool();
+    else if (key == QLatin1String("outline")) t.outline = std::clamp(v.toDouble(), 0.0, 0.3);
+    else if (key == QLatin1String("outlineColor")) t.outlineColor = v.toString();
+    else if (key == QLatin1String("background")) t.background = v.toString();
+    else if (key == QLatin1String("align")) t.align = v.toString();
+}
+
+void Project::setTextProperty(const QString &segmentId, const QString &key, const QVariant &value, bool commit)
+{
+    if (const Segment *s = std::as_const(m_draft).segment(segmentId); !s || s->materialId != kTextMaterialId) return;
+    liveOrCommit(segmentId, commit, [&](Segment &s) { applyTextProperty(s, key, value); });
+}
+
+QString Project::addText(const QString &text, qint64 at, qint64 duration, const QString &preset)
+{
+    Segment seg;
+    seg.id = Draft::newId();
+    seg.materialId = kTextMaterialId;
+    seg.start = std::max<qint64>(0, at);
+    seg.duration = duration > 0 ? duration : kTextDefaultUs;
+    seg.text.text = text;
+    if (!mtg::applyTextPreset(preset, &seg.text, &seg.transform))
+        mtg::applyTextPreset(QStringLiteral("title"), &seg.text, &seg.transform);
+    const bool ok = edit([&](Draft &d) {
+        d.ensureTextMaterial();
+        place(d, seg, {}, TrackRole::Overlay);
+        return true;
+    });
+    if (!ok) return {};
+    setSelectedId(seg.id);
+    return seg.id;
+}
+
+void Project::applyTextPreset(const QString &segmentId, const QString &preset)
+{
+    edit([&](Draft &d) {
+        Segment *s = d.segment(segmentId);
+        if (!s || s->materialId != kTextMaterialId) return false;
+        return mtg::applyTextPreset(preset, &s->text, &s->transform);
+    });
+}
+
+QStringList Project::textPresets() const
+{
+    return {QStringLiteral("title"), QStringLiteral("subtitle"), QStringLiteral("caption"),
+            QStringLiteral("lower-third"), QStringLiteral("end-card")};
+}
+
+bool Project::applyDraft(const Draft &draft)
+{
+    return edit([&](Draft &d) {
+        d = draft;
+        return true;
+    });
+}
+
+void Project::beginUndoGroup()
+{
+    if (m_groupDepth++ == 0) m_groupPushed = false;
+}
+
+void Project::endUndoGroup()
+{
+    if (m_groupDepth > 0 && --m_groupDepth == 0) m_groupPushed = false;
 }
 
 void Project::resetTransform(const QString &segmentId)

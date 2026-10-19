@@ -1,3 +1,5 @@
+#include "app/Agent.h"
+#include "app/AgentCli.h"
 #include "app/Exporter.h"
 #include "app/Player.h"
 #include "app/Project.h"
@@ -9,6 +11,8 @@
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QKeyEvent>
+#include <QQuickItem>
 #include <QTimer>
 #include <cstdio>
 
@@ -57,16 +61,39 @@ int main(int argc, char *argv[])
     const QCommandLineOption seekOpt("seek", "Initial playhead position in seconds.", "seconds");
     const QCommandLineOption selectOpt("select-first", "Select the first main-track clip.");
     const QCommandLineOption playOpt("play", "Start playback once the window is up.");
-    cli.addOptions({openOpt, importOpt, overlayOpt, saveOpt, exportOpt, shotOpt, seekOpt, selectOpt, playOpt});
+    const QCommandLineOption textOpt("text", "Add a text clip at the start: <preset>:<text>.", "preset:text");
+    const QCommandLineOption profileOpt("profile", "Assistant model profile id (e.g. ollama, claude).", "id");
+    const QCommandLineOption agentOpt("agent", "Send a request to the assistant (repeatable), then quit.", "request");
+    const QCommandLineOption evalOpt("eval", "Run an assistant eval file, then quit.", "cases.json");
+    const QCommandLineOption mediaOpt("media", "Media folder for --eval.", "dir");
+    const QCommandLineOption onlyOpt("only", "Run only eval cases whose name contains this.", "text");
+    const QCommandLineOption typeOpt("ui-type", "Type into the chat box and press Enter once the window is up.", "text");
+    const QCommandLineOption waitOpt("ui-wait", "Seconds before --screenshot is taken (default 3).", "seconds");
+    cli.addOptions({typeOpt, waitOpt});
+    cli.addOptions({openOpt, importOpt, overlayOpt, saveOpt, exportOpt, shotOpt, seekOpt, selectOpt, playOpt, textOpt,
+                    profileOpt, agentOpt, evalOpt, mediaOpt, onlyOpt});
     cli.process(app);
 
     Project project(&app);
     Player player(&project);
     Exporter exporter(&project);
+    Agent agent(&project, &exporter, &app);
+    if (cli.isSet(profileOpt)) agent.setProfileId(cli.value(profileOpt));
 
     QObject::connect(&project, &Project::message, [](const QString &m) { std::fprintf(stderr, "%s\n", qPrintable(m)); });
     if (cli.isSet(openOpt)) project.load(QUrl::fromLocalFile(QFileInfo(cli.value(openOpt)).absoluteFilePath()));
     populate(project, cli.values(importOpt), cli.values(overlayOpt));
+    for (const QString &t : cli.values(textOpt))
+        project.addText(t.section(QLatin1Char(':'), 1).replace(QStringLiteral("\\n"), QStringLiteral("\n")), 0,
+                        project.duration() > 0 ? project.duration() : 0, t.section(QLatin1Char(':'), 0, 0));
+
+    if (cli.isSet(evalOpt))
+        return AgentCli::runEval(agent, project, cli.value(evalOpt), cli.value(mediaOpt), cli.value(onlyOpt));
+    if (cli.isSet(agentOpt)) {
+        const int rc = AgentCli::runRequests(agent, project, cli.values(agentOpt));
+        if (cli.isSet(saveOpt)) project.save(QUrl::fromLocalFile(QFileInfo(cli.value(saveOpt)).absoluteFilePath()));
+        if (!cli.isSet(shotOpt)) return rc;
+    }
     if (cli.isSet(saveOpt)) project.save(QUrl::fromLocalFile(QFileInfo(cli.value(saveOpt)).absoluteFilePath()));
 
     if (cli.isSet(exportOpt)) {
@@ -88,10 +115,37 @@ int main(int argc, char *argv[])
     engine.loadFromModule("Montage", "Main");
 
     if (cli.isSet(playOpt)) QTimer::singleShot(500, &player, &Player::play);
+    // UI test hook: real key events into the chat box, as a person would type.
+    if (cli.isSet(typeOpt) && !engine.rootObjects().isEmpty()) {
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        const QString text = cli.value(typeOpt);
+        QTimer::singleShot(1000, &app, [window, text] {
+            auto *input = window ? window->findChild<QQuickItem *>(QStringLiteral("chatInput")) : nullptr;
+            if (!input) {
+                std::fprintf(stderr, "ui-type: chat input not found\n");
+                return;
+            }
+            input->forceActiveFocus(Qt::MouseFocusReason);
+            std::fprintf(stderr, "ui-type: focus on %s\n", qPrintable(window->activeFocusItem() ? window->activeFocusItem()->objectName() : QStringLiteral("(none)")));
+            for (const QChar c : text) {
+                QKeyEvent press(QEvent::KeyPress, 0, Qt::NoModifier, QString(c));
+                QKeyEvent release(QEvent::KeyRelease, 0, Qt::NoModifier, QString(c));
+                QCoreApplication::sendEvent(window, &press);
+                QCoreApplication::sendEvent(window, &release);
+            }
+            std::fprintf(stderr, "ui-type: field now holds \"%s\"\n", qPrintable(input->property("text").toString()));
+            QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier, QStringLiteral("\r"));
+            QCoreApplication::sendEvent(window, &enter);
+            std::fprintf(stderr, "ui-type: after Enter the field holds \"%s\", agent busy=%d\n",
+                         qPrintable(input->property("text").toString()), Agent::instance()->busy());
+        });
+    }
+
     if (cli.isSet(shotOpt) && !engine.rootObjects().isEmpty()) {
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         const QString out = cli.value(shotOpt);
-        QTimer::singleShot(3000, &app, [window, out] {
+        const int waitMs = int((cli.isSet(waitOpt) ? cli.value(waitOpt).toDouble() : 3.0) * 1000);
+        QTimer::singleShot(waitMs, &app, [window, out] {
             const bool ok = window && window->grabWindow().save(out);
             std::fprintf(stderr, "%s %s (playhead %.3fs, playing %d)\n", ok ? "saved" : "failed to save",
                          qPrintable(out), Player::instance()->position() / 1e6, Player::instance()->playing());

@@ -12,6 +12,7 @@ QString kindName(MaterialKind k)
     case MaterialKind::Video: return QStringLiteral("video");
     case MaterialKind::Audio: return QStringLiteral("audio");
     case MaterialKind::Image: return QStringLiteral("image");
+    case MaterialKind::Text: return QStringLiteral("text");
     }
     return {};
 }
@@ -30,6 +31,7 @@ static MaterialKind kindFromName(const QString &s)
 {
     if (s == QLatin1String("audio")) return MaterialKind::Audio;
     if (s == QLatin1String("image")) return MaterialKind::Image;
+    if (s == QLatin1String("text")) return MaterialKind::Text;
     return MaterialKind::Video;
 }
 
@@ -60,6 +62,84 @@ Draft::Draft()
 QString Draft::newId()
 {
     return QUuid::createUuid().toString(QUuid::WithoutBraces).left(13);
+}
+
+void Draft::ensureTextMaterial()
+{
+    if (material(kTextMaterialId)) return;
+    Material m;
+    m.id = kTextMaterialId;
+    m.kind = MaterialKind::Text;
+    m.name = QStringLiteral("Text");
+    m.hasVideo = true;
+    materials.append(m);
+}
+
+static QJsonObject textToJson(const TextStyle &t)
+{
+    return QJsonObject{
+        {"text", t.text},
+        {"font", t.font},
+        {"size", t.size},
+        {"color", t.color},
+        {"bold", t.bold},
+        {"outline", t.outline},
+        {"outline_color", t.outlineColor},
+        {"background", t.background},
+        {"align", t.align},
+    };
+}
+
+static TextStyle textFromJson(const QJsonObject &o)
+{
+    TextStyle t;
+    t.text = o.value("text").toString();
+    t.font = o.value("font").toString(t.font);
+    t.size = o.value("size").toDouble(t.size);
+    t.color = o.value("color").toString(t.color);
+    t.bold = o.value("bold").toBool(t.bold);
+    t.outline = o.value("outline").toDouble(t.outline);
+    t.outlineColor = o.value("outline_color").toString(t.outlineColor);
+    t.background = o.value("background").toString();
+    t.align = o.value("align").toString(t.align);
+    return t;
+}
+
+// Starting looks for text clips: style plus where it sits on the canvas.
+bool applyTextPreset(const QString &name, TextStyle *st, Transform *tr)
+{
+    const QString text = st->text;
+    TextStyle base;
+    Transform pos;
+    if (name == QLatin1String("title")) {
+        base.size = 0.11;
+        base.outline = 0.05;
+    } else if (name == QLatin1String("subtitle")) {
+        base.size = 0.06;
+        base.bold = false;
+        base.outline = 0.04;
+        pos.y = 0.3;
+    } else if (name == QLatin1String("caption")) {
+        base.size = 0.055;
+        base.background = QStringLiteral("#B3000000");
+        pos.y = 0.78;
+    } else if (name == QLatin1String("lower-third")) {
+        base.size = 0.05;
+        base.align = QStringLiteral("left");
+        base.background = QStringLiteral("#E61FD1C1");
+        base.color = QStringLiteral("#06201D");
+        pos.x = -0.55;
+        pos.y = 0.52;
+    } else if (name == QLatin1String("end-card")) {
+        base.size = 0.09;
+        base.color = QStringLiteral("#1FD1C1");
+    } else {
+        return false;
+    }
+    base.text = text;
+    *st = base;
+    *tr = pos;
+    return true;
 }
 
 qint64 Draft::duration() const
@@ -160,7 +240,7 @@ QJsonObject Draft::toJson() const
     for (const Track &t : tracks) {
         QJsonArray segs;
         for (const Segment &s : t.segments) {
-            segs.append(QJsonObject{
+            QJsonObject so{
                 {"id", s.id},
                 {"material", s.materialId},
                 {"start", double(s.start)},
@@ -171,7 +251,9 @@ QJsonObject Draft::toJson() const
                 {"transform", QJsonObject{{"x", s.transform.x},
                                           {"y", s.transform.y},
                                           {"scale", s.transform.scale}}},
-            });
+            };
+            if (s.materialId == kTextMaterialId) so.insert("text", textToJson(s.text));
+            segs.append(so);
         }
         trks.append(QJsonObject{{"id", t.id}, {"role", roleName(t.role)}, {"segments", segs}});
     }
@@ -183,6 +265,7 @@ QJsonObject Draft::toJson() const
         {"canvas", QJsonObject{{"width", canvas.width},
                                {"height", canvas.height},
                                {"fps", canvas.fps},
+                               {"background", canvas.background},
                                {"locked", canvasLocked}}},
         {"materials", mats},
         {"tracks", trks},
@@ -199,6 +282,7 @@ Draft Draft::fromJson(const QJsonObject &obj)
     d.canvas.width = c.value("width").toInt(1920);
     d.canvas.height = c.value("height").toInt(1080);
     d.canvas.fps = c.value("fps").toDouble(30);
+    d.canvas.background = c.value("background").toString(QStringLiteral("#000000"));
     d.canvasLocked = c.value("locked").toBool(false);
 
     for (const QJsonValue &v : obj.value("materials").toArray()) {
@@ -237,6 +321,7 @@ Draft Draft::fromJson(const QJsonObject &obj)
             s.transform.x = tr.value("x").toDouble(0);
             s.transform.y = tr.value("y").toDouble(0);
             s.transform.scale = tr.value("scale").toDouble(1);
+            if (so.contains("text")) s.text = textFromJson(so.value("text").toObject());
             if (d.material(s.materialId) && s.duration > 0) t.segments.append(s);
         }
         d.tracks.append(t);

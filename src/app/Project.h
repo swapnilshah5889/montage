@@ -73,7 +73,22 @@ public:
     // one undo step when the matching commit=true call arrives.
     Q_INVOKABLE void setSegmentProperty(const QString &segmentId, const QString &key, double value, bool commit = true);
     Q_INVOKABLE void resetTransform(const QString &segmentId);
+
+    // Text clips. Presets: title, subtitle, caption, lower-third, end-card.
+    Q_INVOKABLE QString addText(const QString &text, qint64 at = 0, qint64 duration = 0,
+                                const QString &preset = QStringLiteral("title"));
+    Q_INVOKABLE void setTextProperty(const QString &segmentId, const QString &key, const QVariant &value,
+                                     bool commit = true);
+    Q_INVOKABLE void applyTextPreset(const QString &segmentId, const QString &preset);
+    Q_INVOKABLE QStringList textPresets() const;
     Q_INVOKABLE void setAspect(const QString &aspect);
+
+    // Replaces the whole timeline in one undoable edit (used by the assistant).
+    bool applyDraft(const mtg::Draft &draft);
+
+    // Group edits (e.g. one assistant request) into a single undo step.
+    void beginUndoGroup();
+    void endUndoGroup();
 
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
@@ -95,6 +110,8 @@ signals:
 private:
     template <typename F>
     bool edit(F &&fn);
+    template <typename F>
+    void liveOrCommit(const QString &segmentId, bool commit, F &&apply);
     void place(mtg::Draft &d, mtg::Segment seg, const QString &trackId, mtg::TrackRole role) const;
     void applyCanvasFromFirstClip(mtg::Draft &d) const;
     void notify();
@@ -103,6 +120,8 @@ private:
     QList<mtg::Draft> m_undo;
     QList<mtg::Draft> m_redo;
     std::optional<mtg::Draft> m_liveEditBase;
+    int m_groupDepth = 0;
+    bool m_groupPushed = false;
     QString m_selected;
     QUrl m_file;
     bool m_dirty = false;

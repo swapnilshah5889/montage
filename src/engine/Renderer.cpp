@@ -6,10 +6,76 @@
 
 #include <QImageReader>
 #include <QPainter>
+#include <QPainterPath>
+#include <QTextLayout>
 #include <QSet>
 #include <algorithm>
 
 namespace mtg {
+
+// Draws a text clip centred on its transform position. Lines wrap at 90% of
+// the canvas width; sizes scale with the canvas so preview matches export.
+static void drawText(QPainter &p, const Segment &seg, QSize canvas)
+{
+    const TextStyle &st = seg.text;
+    if (st.text.trimmed().isEmpty()) return;
+
+    QFont font(st.font);
+    const int shortSide = std::min(canvas.width(), canvas.height());  // same look in 16:9, 9:16 and 1:1
+    font.setPixelSize(std::max(4, int(std::lround(st.size * shortSide * seg.transform.scale))));
+    font.setBold(st.bold);
+    const Qt::Alignment align = st.align == QLatin1String("left")    ? Qt::AlignLeft
+                                : st.align == QLatin1String("right") ? Qt::AlignRight
+                                                                     : Qt::AlignHCenter;
+    QString text = st.text;
+    text.replace(QLatin1Char('\n'), QChar::LineSeparator);
+    QTextLayout layout(text, font);
+    QTextOption option(align);
+    option.setWrapMode(QTextOption::WordWrap);
+    layout.setTextOption(option);
+
+    const double wrapWidth = canvas.width() * 0.9;
+    double y = 0;
+    layout.beginLayout();
+    for (QTextLine line = layout.createLine(); line.isValid(); line = layout.createLine()) {
+        line.setLineWidth(wrapWidth);
+        line.setPosition(QPointF(0, y));
+        y += line.height();
+    }
+    layout.endLayout();
+
+    QPainterPath path;
+    QRectF bounds;
+    for (int i = 0; i < layout.lineCount(); ++i) {
+        const QTextLine line = layout.lineAt(i);
+        const QString part = text.mid(line.textStart(), line.textLength()).trimmed();
+        const QRectF r = line.naturalTextRect();
+        path.addText(QPointF(r.left(), line.y() + line.ascent()), font, part);
+        bounds = bounds.united(r);
+    }
+
+    const QPointF center(canvas.width() / 2.0 * (1 + seg.transform.x),
+                         canvas.height() / 2.0 * (1 + seg.transform.y));
+    const QPointF offset = center - bounds.center();
+
+    p.save();
+    p.setOpacity(std::clamp(seg.opacity, 0.0, 1.0));
+    p.setRenderHint(QPainter::Antialiasing);
+    p.translate(offset);
+    if (!st.background.isEmpty()) {
+        const double pad = font.pixelSize() * 0.35;
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(st.background));
+        p.drawRoundedRect(bounds.adjusted(-pad, -pad * 0.5, pad, pad * 0.5), pad * 0.6, pad * 0.6);
+    }
+    if (st.outline > 0) {
+        QPen pen(QColor(st.outlineColor), st.outline * font.pixelSize() * 2);
+        pen.setJoinStyle(Qt::RoundJoin);
+        p.strokePath(path, pen);
+    }
+    p.fillPath(path, QColor(st.color));
+    p.restore();
+}
 
 Renderer::Renderer() = default;
 Renderer::~Renderer() = default;
@@ -107,7 +173,8 @@ QImage Renderer::renderVideo(qint64 t, QSize size)
 {
     ++m_tick;
     QImage canvas(size, QImage::Format_ARGB32_Premultiplied);
-    canvas.fill(Qt::black);
+    const QColor background(m_draft.canvas.background);
+    canvas.fill(background.isValid() ? background : QColor(Qt::black));
 
     QPainter p(&canvas);
     p.setRenderHint(QPainter::SmoothPixmapTransform);
@@ -118,6 +185,10 @@ QImage Renderer::renderVideo(qint64 t, QSize size)
         for (const Segment &seg : track.segments) {
             if (!seg.contains(t)) continue;
             const Material *mat = m_draft.material(seg.materialId);
+            if (mat && mat->kind == MaterialKind::Text) {
+                drawText(p, seg, size);
+                break;
+            }
             if (!mat || !mat->isVisual() || mat->width <= 0 || mat->height <= 0) break;
 
             // Fit the clip inside the canvas, then apply the segment's

@@ -1,0 +1,608 @@
+{
+  "about": "Assistant eval. Media ids follow the order of each case's media list (m1, m2, ...). Run: Montage --eval tests/eval/cases.json --media tests/media --profile <id>",
+  "cases": [
+    {
+      "name": "fifteen-all",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4",
+        "song.mp3"
+      ],
+      "requests": [
+        "Make a 15 second video using all three clips"
+      ],
+      "checks": [
+        {
+          "type": "length",
+          "min": 14.5,
+          "max": 15.5
+        },
+        {
+          "type": "main_count",
+          "min": 3
+        },
+        {
+          "type": "media_used",
+          "media": "beach.mp4"
+        },
+        {
+          "type": "media_used",
+          "media": "city.mov"
+        },
+        {
+          "type": "media_used",
+          "media": "forest.mp4"
+        }
+      ]
+    },
+    {
+      "name": "vertical-order-music",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "song.mp3"
+      ],
+      "requests": [
+        "Make a 10 second vertical video with the city first and then the beach, with the song quietly in the background"
+      ],
+      "checks": [
+        {
+          "type": "length",
+          "min": 9.5,
+          "max": 10.5
+        },
+        {
+          "type": "aspect",
+          "value": "9:16"
+        },
+        {
+          "type": "main_order",
+          "media": [
+            "city.mov",
+            "beach.mp4"
+          ]
+        },
+        {
+          "type": "audio",
+          "media": "song.mp3",
+          "max_volume": 0.6,
+          "covers_video": true
+        }
+      ]
+    },
+    {
+      "name": "add-title",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Add a title that says \"Summer Trip\" at the start"
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "Summer Trip",
+          "start_max": 0.5
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        },
+        {
+          "type": "length",
+          "min": 9.9,
+          "max": 10.1
+        }
+      ]
+    },
+    {
+      "name": "red-title",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ],
+        "texts": [
+          {
+            "text": "Summer Trip",
+            "at": 0,
+            "duration": 3,
+            "style": "title"
+          }
+        ]
+      },
+      "requests": [
+        "Make the title red"
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "Summer Trip",
+          "color": "red"
+        },
+        {
+          "type": "text_count",
+          "min": 1,
+          "max": 1
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        }
+      ]
+    },
+    {
+      "name": "remove-clip",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m3",
+            "from": 0,
+            "to": 4
+          }
+        ]
+      },
+      "requests": [
+        "Remove the city clip"
+      ],
+      "checks": [
+        {
+          "type": "media_not_used",
+          "media": "city.mov"
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        },
+        {
+          "type": "main_order",
+          "media": [
+            "beach.mp4",
+            "forest.mp4"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "square",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m3",
+            "from": 0,
+            "to": 4
+          }
+        ]
+      },
+      "requests": [
+        "Make it square for Instagram"
+      ],
+      "checks": [
+        {
+          "type": "aspect",
+          "value": "1:1"
+        },
+        {
+          "type": "main_count",
+          "min": 3,
+          "max": 3
+        },
+        {
+          "type": "length",
+          "min": 11.9,
+          "max": 12.1
+        }
+      ]
+    },
+    {
+      "name": "end-caption",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Add a caption \"Thanks for watching\" for the last 3 seconds"
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "Thanks for watching",
+          "ends_with_video": true
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        }
+      ]
+    },
+    {
+      "name": "logo-corner",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "logo.png"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Put the logo in the top right corner for the whole video"
+      ],
+      "checks": [
+        {
+          "type": "overlay",
+          "media": "logo.png",
+          "covers_video": true,
+          "corner": "top-right"
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        },
+        {
+          "type": "media_not_used",
+          "media": "song.mp3"
+        }
+      ]
+    },
+    {
+      "name": "first-2s",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 2,
+            "to": 6
+          },
+          {
+            "media": "m2",
+            "from": 2,
+            "to": 6
+          },
+          {
+            "media": "m3",
+            "from": 2,
+            "to": 6
+          }
+        ]
+      },
+      "requests": [
+        "Use only the first 2 seconds of each clip"
+      ],
+      "checks": [
+        {
+          "type": "clip_max_len",
+          "max": 2.1
+        },
+        {
+          "type": "main_count",
+          "min": 3,
+          "max": 3
+        },
+        {
+          "type": "length",
+          "min": 5.8,
+          "max": 6.2
+        }
+      ]
+    },
+    {
+      "name": "music-lower",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "song.mp3"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ],
+        "audio": [
+          {
+            "media": "m3",
+            "at": 0,
+            "from": 0,
+            "to": 10,
+            "volume": 1
+          }
+        ]
+      },
+      "requests": [
+        "Lower the music volume"
+      ],
+      "checks": [
+        {
+          "type": "audio",
+          "media": "song.mp3",
+          "max_volume": 0.75,
+          "min_volume": 0.05
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        }
+      ]
+    },
+    {
+      "name": "swap",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m3",
+            "from": 0,
+            "to": 4
+          }
+        ]
+      },
+      "requests": [
+        "Swap the order of the first two clips"
+      ],
+      "checks": [
+        {
+          "type": "main_order",
+          "media": [
+            "city.mov",
+            "beach.mp4",
+            "forest.mp4"
+          ]
+        },
+        {
+          "type": "length",
+          "min": 11.9,
+          "max": 12.1
+        }
+      ]
+    },
+    {
+      "name": "logo-intro",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4",
+        "logo.png"
+      ],
+      "requests": [
+        "Make a 20 second video that starts with the logo for 2 seconds, then the three clips"
+      ],
+      "checks": [
+        {
+          "type": "length",
+          "min": 19.5,
+          "max": 20.5
+        },
+        {
+          "type": "first_main",
+          "media": "logo.png"
+        },
+        {
+          "type": "main_count",
+          "min": 4
+        }
+      ]
+    },
+    {
+      "name": "multi-turn",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "song.mp3"
+      ],
+      "requests": [
+        "Make a 12 second video with both clips and the song",
+        "Add a title \"Road Trip\"",
+        "Now make it vertical"
+      ],
+      "checks": [
+        {
+          "type": "length",
+          "min": 11.5,
+          "max": 12.5
+        },
+        {
+          "type": "aspect",
+          "value": "9:16"
+        },
+        {
+          "type": "text",
+          "contains": "Road Trip"
+        },
+        {
+          "type": "audio",
+          "media": "song.mp3"
+        },
+        {
+          "type": "main_count",
+          "min": 2
+        }
+      ]
+    },
+    {
+      "name": "text-intro-empty",
+      "media": [],
+      "requests": [
+        "make a 6 second intro that says \"Welcome to my channel\""
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "Welcome to my channel"
+        },
+        {
+          "type": "length",
+          "min": 5.5,
+          "max": 6.5
+        }
+      ]
+    },
+    {
+      "name": "vertical-city-first-title",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "song.mp3"
+      ],
+      "requests": [
+        "Make a 10 second vertical video with the city first and a title that says \"Hello\""
+      ],
+      "checks": [
+        {
+          "type": "length",
+          "min": 9.5,
+          "max": 10.5
+        },
+        {
+          "type": "aspect",
+          "value": "9:16"
+        },
+        {
+          "type": "first_main",
+          "media": "city.mov"
+        },
+        {
+          "type": "text",
+          "contains": "Hello"
+        }
+      ]
+    },
+    {
+      "name": "intro-dark-blue",
+      "media": [],
+      "requests": [
+        "make a 5 second intro that says \"Swapnil Builds\" on a dark blue background"
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "Swapnil Builds"
+        },
+        {
+          "type": "length",
+          "min": 4.5,
+          "max": 5.5
+        },
+        {
+          "type": "background",
+          "value": "#00008B"
+        }
+      ]
+    }
+  ]
+}

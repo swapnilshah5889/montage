@@ -1,0 +1,67 @@
+{
+  "about": "Held-out assistant eval: not used while tuning prompts. Same format as cases.json.",
+  "cases": [
+    {
+      "name": "three-each",
+      "media": ["beach.mp4", "city.mov", "forest.mp4"],
+      "requests": ["I want a 9 second clip: forest, then city, then beach, 3 seconds each"],
+      "checks": [
+        {"type": "length", "min": 8.8, "max": 9.2},
+        {"type": "main_order", "media": ["forest.mp4", "city.mov", "beach.mp4"]},
+        {"type": "clip_max_len", "max": 3.1}
+      ]
+    },
+    {
+      "name": "tiktok-music",
+      "media": ["beach.mp4", "city.mov", "forest.mp4", "song.mp3"],
+      "requests": ["turn these into a 12s tiktok with the song"],
+      "checks": [
+        {"type": "length", "min": 11.5, "max": 12.5},
+        {"type": "aspect", "value": "9:16"},
+        {"type": "audio", "media": "song.mp3", "covers_video": true}
+      ]
+    },
+    {
+      "name": "lower-third-name",
+      "media": ["beach.mp4", "city.mov"],
+      "setup": {"main": [{"media": "m1", "from": 0, "to": 6}, {"media": "m2", "from": 0, "to": 6}]},
+      "requests": ["Show my name \"Swapnil Shah\" as a lower third during the first 4 seconds"],
+      "checks": [
+        {"type": "text", "contains": "Swapnil Shah", "start_max": 0.5},
+        {"type": "main_count", "min": 2, "max": 2},
+        {"type": "length", "min": 11.9, "max": 12.1}
+      ]
+    },
+    {
+      "name": "shorten",
+      "media": ["beach.mp4", "city.mov", "forest.mp4"],
+      "setup": {"main": [{"media": "m1", "from": 0, "to": 6}, {"media": "m2", "from": 0, "to": 6}, {"media": "m3", "from": 0, "to": 6}]},
+      "requests": ["It's too long, make the whole thing 9 seconds but keep all three shots"],
+      "checks": [
+        {"type": "length", "min": 8.5, "max": 9.5},
+        {"type": "main_count", "min": 3, "max": 3}
+      ]
+    },
+    {
+      "name": "no-music",
+      "media": ["beach.mp4", "city.mov", "song.mp3"],
+      "setup": {"main": [{"media": "m1", "from": 0, "to": 5}, {"media": "m2", "from": 0, "to": 5}],
+                "audio": [{"media": "m3", "at": 0, "from": 0, "to": 10, "volume": 0.5}]},
+      "requests": ["get rid of the music"],
+      "checks": [
+        {"type": "media_not_used", "media": "song.mp3"},
+        {"type": "main_count", "min": 2, "max": 2}
+      ]
+    },
+    {
+      "name": "end-card",
+      "media": ["beach.mp4", "city.mov"],
+      "setup": {"main": [{"media": "m1", "from": 0, "to": 5}, {"media": "m2", "from": 0, "to": 5}]},
+      "requests": ["finish with an end card that says \"Subscribe for more\""],
+      "checks": [
+        {"type": "text", "contains": "Subscribe for more", "ends_with_video": true},
+        {"type": "main_count", "min": 2, "max": 2}
+      ]
+    }
+  ]
+}

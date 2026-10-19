@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Multimedia)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Multimedia Network Qml)
 qt_standard_project_setup(REQUIRES 6.8)
 
 # FFmpeg: libavformat, libavcodec, libavutil, libswscale, libswresample.
@@ -32,7 +32,22 @@ add_library(montage_engine STATIC
 target_include_directories(montage_engine PUBLIC src ${FFMPEG_INCLUDE_DIR})
 target_link_libraries(montage_engine PUBLIC Qt6::Core Qt6::Gui Qt6::Multimedia ${FFMPEG_LIBRARIES})
 
-qt_add_executable(Montage MACOSX_BUNDLE src/main.cpp)
+# AI layer: model-agnostic chat providers, edit plans, prompts.
+add_library(montage_ai STATIC
+    src/ai/ChatProvider.h src/ai/ChatProvider.cpp
+    src/ai/Keychain.h src/ai/Keychain.cpp
+    src/ai/EditPlan.h src/ai/EditPlan.cpp
+    src/ai/PlanGuards.h src/ai/PlanGuards.cpp
+    src/ai/Prompts.h src/ai/Prompts.cpp
+)
+target_link_libraries(montage_ai PUBLIC montage_engine Qt6::Network)
+if(APPLE)
+    target_link_libraries(montage_ai PUBLIC "-framework Security" "-framework CoreFoundation")
+endif()
+
+qt_add_executable(Montage MACOSX_BUNDLE src/main.cpp
+    src/ai/EditorTools.h src/ai/EditorTools.cpp
+    src/app/AgentCli.h src/app/AgentCli.cpp)
 
 set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 qt_add_qml_module(Montage
@@ -50,7 +65,10 @@ qt_add_qml_module(Montage
         qml/TimeRuler.qml
         qml/SegmentItem.qml
         qml/TimelinePanel.qml
+        qml/ChatPanel.qml
+        qml/ModelSettings.qml
     SOURCES
+        src/app/Agent.h src/app/Agent.cpp
         src/app/Project.h src/app/Project.cpp
         src/app/Player.h src/app/Player.cpp
         src/app/Exporter.h src/app/Exporter.cpp
@@ -58,7 +76,7 @@ qt_add_qml_module(Montage
 )
 
 target_include_directories(Montage PRIVATE src/app)
-target_link_libraries(Montage PRIVATE montage_engine Qt6::Quick Qt6::QuickControls2)
+target_link_libraries(Montage PRIVATE montage_ai Qt6::Quick Qt6::QuickControls2)
 set_target_properties(Montage PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER dev.montage.editor
     MACOSX_BUNDLE_BUNDLE_NAME Montage
@@ -67,7 +85,11 @@ set_target_properties(Montage PROPERTIES
 
 # Editing-model tests: ctest, or build/project_test <media dir>
 enable_testing()
-find_package(Qt6 REQUIRED COMPONENTS Qml)
+add_executable(plan_test tests/plan_test.cpp)
+target_include_directories(plan_test PRIVATE src)
+target_link_libraries(plan_test PRIVATE montage_ai)
+add_test(NAME plan COMMAND plan_test)
+
 add_executable(project_test tests/project_test.cpp src/app/Project.h src/app/Project.cpp)
 target_include_directories(project_test PRIVATE src)
 target_link_libraries(project_test PRIVATE montage_engine Qt6::Qml)
