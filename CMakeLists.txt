@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Multimedia Network Qml)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Multimedia Network Qml WebSockets)
 qt_standard_project_setup(REQUIRES 6.8)
 
 # FFmpeg: libavformat, libavcodec, libavutil, libswscale, libswresample.
@@ -28,6 +28,8 @@ add_library(montage_engine STATIC
     src/engine/Animation.h src/engine/Animation.cpp
     src/engine/Effects.h src/engine/Effects.mm
     src/engine/Reframe.h src/engine/Reframe.mm
+    src/engine/Beats.h src/engine/Beats.cpp
+    src/engine/Speech.h src/engine/Speech.cpp
     src/engine/Renderer.h src/engine/Renderer.cpp
     src/engine/PreviewEngine.h src/engine/PreviewEngine.cpp
     src/engine/ExportJob.h src/engine/ExportJob.cpp
@@ -45,9 +47,14 @@ add_library(montage_ai STATIC
     src/ai/PlanGuards.h src/ai/PlanGuards.cpp
     src/ai/AdStyles.h src/ai/AdStyles.cpp
     src/ai/Brand.h src/ai/Brand.cpp
+    src/ai/Finishing.h src/ai/Finishing.cpp
     src/ai/Prompts.h src/ai/Prompts.cpp
+    src/ai/Generators.h src/ai/Generators.cpp
 )
-target_link_libraries(montage_ai PUBLIC montage_engine Qt6::Network)
+target_link_libraries(montage_ai PUBLIC montage_engine Qt6::Network Qt6::WebSockets)
+# Helper scripts the generators run with each model's own Python.
+qt_add_resources(montage_ai "generate_scripts" PREFIX "/generate" BASE scripts/generate
+    FILES scripts/generate/kokoro_tts.py scripts/generate/acestep_music.py)
 if(APPLE)
     target_link_libraries(montage_ai PUBLIC "-framework Security" "-framework CoreFoundation")
 endif()

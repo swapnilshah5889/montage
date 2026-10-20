@@ -2,6 +2,7 @@
 
 #include "Effects.h"
 
+#import <Vision/Vision.h>
 #import <CoreImage/CoreImage.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -178,6 +179,31 @@ CIImage *scanlines(CIImage *img, double s, CGRect e)
     return over(crop(stripes, e), img);
 }
 
+// Keeps the subject (people, products, animals: Vision's foreground
+// instances) and makes everything else transparent, with softened edges.
+// Returns the input unchanged when nothing stands out.
+CIImage *cutout(CIImage *img, CGRect e)
+{
+    if (@available(macOS 14.0, *)) {
+        VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCIImage:img options:@{}];
+        VNGenerateForegroundInstanceMaskRequest *req = [[VNGenerateForegroundInstanceMaskRequest alloc] init];
+        NSError *error = nil;
+        if (![handler performRequests:@[req] error:&error]) return img;
+        VNInstanceMaskObservation *obs = req.results.firstObject;
+        if (!obs || obs.allInstances.count == 0) return img;
+        CVPixelBufferRef maskBuffer = [obs generateScaledMaskForImageForInstances:obs.allInstances fromRequestHandler:handler error:&error];
+        if (!maskBuffer) return img;
+        CIImage *mask = [CIImage imageWithCVPixelBuffer:maskBuffer];
+        CVPixelBufferRelease(maskBuffer);
+        // Line the mask up with the frame, then soften its edge by about a pixel.
+        mask = [mask imageByApplyingTransform:CGAffineTransformMakeScale(e.size.width / mask.extent.size.width,
+                                                                            e.size.height / mask.extent.size.height)];
+        mask = blur(mask, std::max(0.6, e.size.height / 1080.0), e);
+        return ciFilter(@"CIBlendWithMask", img, @{kCIInputBackgroundImageKey: [CIImage emptyImage], kCIInputMaskImageKey: mask});
+    }
+    return img;
+}
+
 CIImage *affineAround(CIImage *img, CGRect e, double scale, double dx, double dy)
 {
     CGAffineTransform t = CGAffineTransformMakeTranslation(CGRectGetMidX(e) + dx, CGRectGetMidY(e) + dy);
@@ -280,6 +306,7 @@ struct EffectProcessor::Impl {
         if (n == QLatin1String("zoom-blur"))
             return crop(ciFilter(@"CIZoomBlur", [img imageByClampingToExtent], @{kCIInputCenterKey: [CIVector vectorWithX:CGRectGetMidX(e) Y:CGRectGetMidY(e)],
                                                                              @"inputAmount": @(18 * a * s)}), e);
+        if (n == QLatin1String("cutout")) return a >= 0.999 ? cutout(img, e) : mix(img, cutout(img, e), std::clamp(a, 0.0, 1.0));
         if (n == QLatin1String("lut") && !fx.path.isEmpty() && loadLut(fx.path)) {
             CIImage *graded = ciFilter(@"CIColorCubeWithColorSpace", img, @{@"inputCubeDimension": @(lutSize.value(fx.path)),
                                                                          @"inputCubeData": lutData.value(fx.path),
@@ -366,7 +393,7 @@ QStringList effectNames()
     return {"cinematic", "vintage", "noir", "black-white", "golden-hour", "vivid", "warm", "cool", "faded",
             "dramatic", "neon", "brightness", "contrast", "saturation", "exposure", "temperature", "blur",
             "glow", "vignette", "grain", "sharpen", "rgb-split", "glitch", "vhs", "pixelate", "posterize",
-            "letterbox", "light-leak", "zoom-blur", "motion-blur", "lut"};
+            "letterbox", "light-leak", "zoom-blur", "motion-blur", "cutout", "lut"};
 }
 
 QStringList momentNames()

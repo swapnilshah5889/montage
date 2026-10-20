@@ -439,6 +439,20 @@ Rectangle {
                     onMoved: (v) => panel.live("volume", v / 100)
                     onCommitted: (v) => panel.commit("volume", v / 100)
                 }
+                CheckBox {
+                    text: "Someone talking"
+                    focusPolicy: Qt.NoFocus
+                    checked: panel.has && panel.sel.speech === true
+                    onToggled: Project.setSegmentProperty(panel.sel.id, "speech", checked ? 1 : 0)
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Music set to dip will get quieter while this plays"
+                }
+                CheckBox {
+                    text: "Dip while someone talks"
+                    focusPolicy: Qt.NoFocus
+                    checked: panel.has && panel.sel.duck > 0
+                    onToggled: Project.setSegmentProperty(panel.sel.id, "duck", checked ? 0.3 : 0)
+                }
             }
 
             FlatButton {

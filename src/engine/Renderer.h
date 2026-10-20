@@ -67,6 +67,8 @@ private:
     quint64 m_tick = 0;
     std::unique_ptr<EffectProcessor> m_fx;  // created on first use
     std::vector<float> m_resample;          // scratch for time-remapped audio
+    QList<QPair<qint64, qint64>> m_speech;  // timeline spans where someone talks (for ducking)
+    bool m_speechReady = false;
 };
 
 }  // namespace mtg

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "model/Draft.h"
 #include "ChatProvider.h"
 
 #include <QImage>
@@ -10,6 +11,9 @@ class Project;
 class Exporter;
 
 namespace mtg::ai {
+
+class Generators;
+struct GenResolution;
 
 // The editor's capabilities as model tools. All edits go through Project, so
 // they show up live and undo like manual edits.
@@ -40,15 +44,28 @@ public:
     // gets the written paths (one per line) or the error.
     void exportVideo(const QString &name, const QStringList &formats, const std::function<void(bool, QString)> &done);
 
+    // Makes the media a plan's "generate" list asks for, imports it and binds
+    // the plan's references to it. Progress comes from generators().
+    void resolveGenerated(const QJsonObject &plan, const std::function<void(const GenResolution &)> &done);
+    void cancelGeneration();
+
+    // Runs the finishing steps a built draft asks for (beat sync, captions)
+    // on a worker thread; `done` gets the result, notes and problems on this one.
+    void finishAsync(const Draft &draft, const std::function<void(const Draft &, QStringList, QStringList)> &done);
+    Generators *generators() const { return m_generators; }
+
 private:
     ToolResult lookAtMedia(const ToolCall &call) const;
     ToolResult renderPreview(const ToolCall &call) const;
-    ToolResult applyPlan(const ToolCall &call);
+    void applyPlan(const ToolCall &call, const std::function<void(ToolResult)> &done);
     ToolResult findMedia(const ToolCall &call) const;
     ToolResult importMedia(const ToolCall &call);
+    void generateMedia(const ToolCall &call, const std::function<void(ToolResult)> &done);
+    void applyAndExport(const ToolCall &call, const QStringList &notes, const std::function<void(ToolResult)> &done);
 
     Project *m_project;
     Exporter *m_exporter;
+    Generators *m_generators;
     QString m_request;
 };
 

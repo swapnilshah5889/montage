@@ -30,6 +30,8 @@ class Project : public QObject
     Q_PROPERTY(QUrl fileUrl READ fileUrl NOTIFY changed)
     Q_PROPERTY(QString selectedId READ selectedId WRITE setSelectedId NOTIFY selectionChanged)
     Q_PROPERTY(QVariantMap selection READ selection NOTIFY selectionChanged)
+    Q_PROPERTY(QString beatSync READ beatSync NOTIFY changed)
+    Q_PROPERTY(bool captioning READ captioning NOTIFY captioningChanged)
 
 public:
     // Not default-constructible on purpose: QML would otherwise build its
@@ -99,6 +101,14 @@ public:
     // Main track: how a clip of another shape fills the frame (auto, fill, fit, fit-blur).
     Q_INVOKABLE void setFraming(const QString &segmentId, const QString &framing);
     Q_INVOKABLE QStringList framingNames() const;
+
+    // Smart edit: cut to the music ("beats", "bars", or "" for off), and
+    // captions of what's said (transcribed locally, in the background).
+    QString beatSync() const;
+    Q_INVOKABLE void setBeatSync(const QString &mode);
+    bool captioning() const { return m_captioning; }
+    Q_INVOKABLE void autoCaptions(const QString &style);
+    Q_INVOKABLE void clearCaptions();
     Q_INVOKABLE QStringList transitionNames() const;
 
     // Speed keeps the clip's source footage and changes its length (faster =
@@ -141,6 +151,7 @@ signals:
     void liveChanged();  // values changed during a drag: re-render only
     void selectionChanged();
     void message(const QString &text);
+    void captioningChanged();
 
 private:
     template <typename F>
@@ -158,6 +169,7 @@ private:
     int m_groupDepth = 0;
     bool m_groupPushed = false;
     QString m_selected;
+    bool m_captioning = false;
     QUrl m_file;
     bool m_dirty = false;
     QString m_thumbDir;

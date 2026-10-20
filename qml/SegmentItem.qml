@@ -46,6 +46,21 @@ Rectangle {
         opacity: 0.9
     }
 
+    // Beat ticks on music, for cutting to the beat by eye.
+    Repeater {
+        model: item.seg.kind === "audio" && item.seg.beats ? item.seg.beats : []
+        delegate: Rectangle {
+            required property var modelData
+            x: item.timeline.xOf(modelData * 1e6) - item.trimL
+            y: parent.height - 8
+            width: 1
+            height: 6
+            color: "white"
+            opacity: 0.45
+            visible: x > 0 && x < item.width
+        }
+    }
+
     // Audio clips get a simple level strip instead of thumbnails.
     Rectangle {
         visible: item.seg.kind === "audio"

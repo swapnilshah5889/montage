@@ -2,7 +2,10 @@
 
 #include "AdStyles.h"
 #include "Brand.h"
+#include "Finishing.h"
 #include "EditPlan.h"
+#include "Generators.h"
+#include "PlanGuards.h"
 #include "app/Exporter.h"
 #include "app/Project.h"
 #include "engine/Renderer.h"
@@ -19,6 +22,7 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QThread>
 #include <QUrl>
 #include <cmath>
 
@@ -103,6 +107,7 @@ EditorTools::EditorTools(Project *project, Exporter *exporter, QObject *parent)
     : QObject(parent)
     , m_project(project)
     , m_exporter(exporter)
+    , m_generators(new Generators(this))
 {
 }
 
@@ -152,6 +157,24 @@ QList<ToolSpec> EditorTools::specs(bool vision) const
         "using files that aren't in the media list yet.",
         schema({{"paths", QJsonObject{{"type", "array"}, {"items", QJsonObject{{"type", "string"}}}}}}, {"paths"})};
     out << ToolSpec{
+        "generate_media",
+        "Makes new media with the local AI models and imports it, returning the new media ids: an image (product "
+        "backgrounds, b-roll stills; describe the scene, no text in it), a voiceover (the exact words to say, with a "
+        "voice: af_heart or af_bella female US, am_michael or am_puck male US, bf_emma female UK, bm_george male UK) "
+        "or music (instrumental, from a description of genre, instruments and mood, plus its length in seconds). "
+        "Takes 10-60 seconds per item. Use it when the user asks for a voiceover, music or a picture they don't "
+        "have; prefer their own media otherwise. You can also put the same items in a plan's \"generate\" list.",
+        schema({{"items", QJsonObject{{"type", "array"},
+                                      {"items", QJsonObject{{"type", "object"},
+                                                            {"properties", QJsonObject{{"kind", QJsonObject{{"type", "string"}, {"enum", QJsonArray::fromStringList(generateKinds())}}},
+                                                                                       {"prompt", QJsonObject{{"type", "string"}, {"description", "Image or music description"}}},
+                                                                                       {"text", QJsonObject{{"type", "string"}, {"description", "Voiceover words"}}},
+                                                                                       {"voice", QJsonObject{{"type", "string"}, {"enum", QJsonArray::fromStringList(voiceNames())}}},
+                                                                                       {"seconds", QJsonObject{{"type", "number"}, {"description", "Music length"}}},
+                                                                                       {"aspect", QJsonObject{{"type", "string"}, {"description", "Image shape, e.g. 9:16; defaults to the video's"}}}}},
+                                                            {"required", QJsonArray{"kind"}}}}}}},
+               {"items"})};
+    out << ToolSpec{
         "export_video",
         "Renders the timeline to an MP4 in the user's Movies/Montage folder and returns the file path. Only call this "
         "when the user asks to export, render, save or download the video. For several platforms at once (\"for TikTok "
@@ -186,18 +209,32 @@ void EditorTools::run(const ToolCall &call, bool vision, const std::function<voi
     if (n == QLatin1String("get_project")) {
         done(ToolResult{call.id, n, projectState(true)});
     } else if (n == QLatin1String("apply_plan")) {
-        ToolResult r = applyPlan(call);
-        const bool wantsExport = !r.isError && call.input.value("plan").toObject().value("export").toBool();
-        if (!wantsExport) {
-            done(r);
+        const QJsonValue planValue = call.input.value("plan");
+        const QJsonObject plan = planValue.isString() ? QJsonDocument::fromJson(planValue.toString().toUtf8()).object() : planValue.toObject();
+        if (plan.value("generate").toArray().isEmpty()) {
+            applyAndExport(call, {}, done);
             return;
         }
-        QStringList formats;
-        for (const QJsonValue &v : call.input.value("plan").toObject().value("export_formats").toArray()) formats << v.toString();
-        exportVideo(m_project->name(), formats, [r, done](bool ok, const QString &msg) mutable {
-            r.text += QStringLiteral("\n\n") + (ok ? QStringLiteral("Exported to ") + msg : QStringLiteral("Export failed: ") + msg);
-            done(r);
+        resolveGenerated(plan, [this, call, done](const GenResolution &r) {
+            if (r.cancelled) {
+                done(error(call, QStringLiteral("Generation was cancelled; nothing was changed.")));
+                return;
+            }
+            const Draft &d = m_project->draft();
+            const MediaIndex index(d);
+            QJsonObject resolved = r.plan;
+            QStringList notes = r.errors;
+            notes += placeGenerated(r.generated, m_request, d, index, &resolved);
+            if (duckUnderVoiceover(m_request, d, index, &resolved)) notes << QStringLiteral("the music dips while the voiceover speaks");
+            QStringList made;
+            for (auto it = r.made.cbegin(); it != r.made.cend(); ++it) made << QStringLiteral("%1 is now %2").arg(it.key(), it.value());
+            if (!made.isEmpty()) notes.prepend(QStringLiteral("generated media: ") + made.join(", "));
+            ToolCall c = call;
+            c.input.insert("plan", resolved);
+            applyAndExport(c, notes, done);
         });
+    } else if (n == QLatin1String("generate_media")) {
+        generateMedia(call, done);
     } else if (n == QLatin1String("look_at_media") && vision) {
         done(lookAtMedia(call));
     } else if (n == QLatin1String("render_preview") && vision) {
@@ -218,28 +255,121 @@ void EditorTools::run(const ToolCall &call, bool vision, const std::function<voi
     }
 }
 
-ToolResult EditorTools::applyPlan(const ToolCall &call)
+void EditorTools::applyAndExport(const ToolCall &call, const QStringList &notes, const std::function<void(ToolResult)> &done)
+{
+    applyPlan(call, [this, call, notes, done](ToolResult r) {
+        if (!notes.isEmpty() && !r.isError) r.text = QStringLiteral("Also: ") + notes.join("; ") + QStringLiteral("\n") + r.text;
+        const bool wantsExport = !r.isError && call.input.value("plan").toObject().value("export").toBool();
+        if (!wantsExport) {
+            done(r);
+            return;
+        }
+        QStringList formats;
+        for (const QJsonValue &v : call.input.value("plan").toObject().value("export_formats").toArray()) formats << v.toString();
+        exportVideo(m_project->name(), formats, [r, done](bool ok, const QString &msg) mutable {
+            r.text += QStringLiteral("\n\n") + (ok ? QStringLiteral("Exported to ") + msg : QStringLiteral("Export failed: ") + msg);
+            done(r);
+        });
+    });
+}
+
+void EditorTools::resolveGenerated(const QJsonObject &plan, const std::function<void(const GenResolution &)> &done)
+{
+    m_generators->resolve(plan, m_project->draft(),
+                          [this](const QStringList &paths) -> const Draft & {
+                              QList<QUrl> urls;
+                              for (const QString &p : paths) urls << QUrl::fromLocalFile(p);
+                              if (!urls.isEmpty()) m_project->importFiles(urls);  // no-op for files already imported
+                              return m_project->draft();
+                          },
+                          done);
+}
+
+void EditorTools::cancelGeneration()
+{
+    m_generators->cancel();
+}
+
+void EditorTools::generateMedia(const ToolCall &call, const std::function<void(ToolResult)> &done)
+{
+    QJsonArray items;
+    for (const QJsonValue &v : call.input.value("items").toArray()) {
+        QJsonObject o = v.toObject();
+        o.remove("as");  // named g1, g2... in order
+        items.append(o);
+    }
+    QStringList warnings;
+    if (generateRequests(QJsonObject{{"generate", items}}, &warnings).isEmpty()) {
+        done(error(call, QStringLiteral("Nothing to generate. ") + warnings.join(' ')));
+        return;
+    }
+    resolveGenerated(QJsonObject{{"generate", items}}, [this, call, done](const GenResolution &r) {
+        if (r.cancelled) {
+            done(error(call, QStringLiteral("Generation was cancelled.")));
+            return;
+        }
+        const Draft &d = m_project->draft();
+        const MediaIndex index(d);
+        const QStringList lines = describeMedia(d, index).split('\n');
+        QStringList made;
+        for (const QString &alias : r.generated) made << lines.value(int(index.materialIds().indexOf(index.materialId(alias))));
+        QString text = made.isEmpty() ? QString() : QStringLiteral("Generated and imported:\n") + made.join('\n');
+        if (!r.errors.isEmpty()) text += (text.isEmpty() ? QString() : QStringLiteral("\n\n")) + QStringLiteral("Failed:\n") + r.errors.join('\n');
+        done(ToolResult{call.id, call.name, text, {}, made.isEmpty()});
+    });
+}
+
+void EditorTools::applyPlan(const ToolCall &call, const std::function<void(ToolResult)> &done)
 {
     const QJsonValue planValue = call.input.value("plan");
     QJsonObject plan = planValue.toObject();
     if (planValue.isString())  // some models send the plan as a JSON string
         plan = QJsonDocument::fromJson(planValue.toString().toUtf8()).object();
-    if (plan.isEmpty()) return error(call, QStringLiteral("\"plan\" must be an edit plan object."));
+    if (plan.isEmpty()) {
+        done(error(call, QStringLiteral("\"plan\" must be an edit plan object.")));
+        return;
+    }
 
     const Draft &current = m_project->draft();
     const MediaIndex index(current);
     const QJsonObject before = planFromDraft(current, index);
-    QStringList styled = applyBrand(m_request, loadBrandKit(), before, current, index, &plan);
+    QStringList styled = applySmartRequests(m_request, current, index, &plan);
+    styled += applyBrand(m_request, loadBrandKit(), before, current, index, &plan);
     styled += applyAdStyle(before, current, index, &plan);
     PlanReport report;
     const Draft next = draftFromPlan(current, plan, index, &report);
-    if (!report.ok()) return error(call, report.text());
+    if (!report.ok()) {
+        done(error(call, report.text()));
+        return;
+    }
     report.warnings = styled + report.warnings;
-    m_project->applyDraft(next);
-    const Draft &now = m_project->draft();
-    QString text = report.warnings.isEmpty() ? QStringLiteral("Applied.") : report.text();
-    text += QStringLiteral("\n\n") + summarize(now, MediaIndex(now));
-    return ToolResult{call.id, call.name, text};
+    auto apply = [this, call, done, report](const Draft &built, const QStringList &notes, const QStringList &problems) mutable {
+        report.warnings += notes;
+        report.warnings += problems;
+        m_project->applyDraft(built);
+        const Draft &now = m_project->draft();
+        QString text = report.warnings.isEmpty() ? QStringLiteral("Applied.") : report.text();
+        text += QStringLiteral("\n\n") + summarize(now, MediaIndex(now));
+        done(ToolResult{call.id, call.name, text});
+    };
+    if (needsFinishing(next)) finishAsync(next, apply);
+    else apply(next, {}, {});
+}
+
+void EditorTools::finishAsync(const Draft &draft, const std::function<void(const Draft &, QStringList, QStringList)> &done)
+{
+    struct Result {
+        Draft draft;
+        QStringList notes, problems;
+    };
+    auto *result = new Result{draft, {}, {}};
+    QThread *worker = QThread::create([result] { result->notes = finishDraft(result->draft, &result->problems); });
+    connect(worker, &QThread::finished, this, [worker, result, done] {
+        done(result->draft, result->notes, result->problems);
+        delete result;
+        worker->deleteLater();
+    });
+    worker->start();
 }
 
 ToolResult EditorTools::lookAtMedia(const ToolCall &call) const

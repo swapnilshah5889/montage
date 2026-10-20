@@ -1,5 +1,6 @@
 #pragma once
 
+#include "model/Draft.h"
 #include "ai/ChatProvider.h"
 
 #include <QAbstractListModel>
@@ -19,18 +20,22 @@ class ChatModel : public QAbstractListModel
     QML_ELEMENT
     QML_UNCREATABLE("Owned by Agent")
 public:
-    enum Role { KindRole = Qt::UserRole + 1, TextRole, PendingRole };
+    enum Role { KindRole = Qt::UserRole + 1, TextRole, PendingRole, ProgressRole, DetailRole, StateRole };
     using QAbstractListModel::QAbstractListModel;
 
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
 
-    // kind: user | assistant | activity | error
+    // kind: user | assistant | activity | error | generate
     int add(const QString &kind, const QString &text, bool pending = false);
     void appendText(int row, const QString &delta);
     void setText(int row, const QString &text);
     void setPending(int row, bool pending);
+    // Generation rows: fraction 0-1 (-1 = unknown) and what's happening now.
+    void setProgress(int row, double fraction, const QString &detail);
+    // state: running | done | failed | cancelled
+    void setState(int row, const QString &state, const QString &detail);
     void clear();
     QString text(int row) const;
 
@@ -38,6 +43,8 @@ private:
     struct Item {
         QString kind, text;
         bool pending = false;
+        double progress = -1;
+        QString detail, state;
     };
     QList<Item> m_items;
 };
@@ -115,6 +122,10 @@ private:
     void startGuided(const QString &text);
     void requestPlan(const QString &feedback);
     void onPlan(const QJsonObject &plan, const QString &raw, const QString &error);
+    void buildPlan(const QJsonObject &modelPlan, QJsonObject plan, QStringList notes, const QStringList &generated);
+    void applyBuilt(const QJsonObject &modelPlan, const QJsonObject &plan, const QStringList &notes, const mtg::Draft &next);
+    void finishBuilt(const QJsonObject &modelPlan, const QJsonObject &plan, const QStringList &notes, const mtg::Draft &next);
+    bool fallBackToLastGood();
     QString planFeedback(const QJsonObject &current, const QJsonObject &plan, double newLength) const;
 
     Project *m_project;
@@ -137,6 +148,16 @@ private:
     QString m_lastRaw;
     int m_attempts = 0;
     QList<QPair<QString, QString>> m_history;  // guided mode: (request, reply)
+    QHash<int, int> m_genRows;                  // generation item -> chat row
+    // The last valid plan of this request: applied when a fix-up round makes things worse.
+    struct GoodPlan {
+        QJsonObject modelPlan, plan;
+        QStringList notes;
+        mtg::Draft draft;
+        bool valid = false;
+    };
+    GoodPlan m_lastGood;
+    QStringList m_genFailed;                    // kinds that failed this request: not retried on a fix-up round
 
     static inline Agent *s_instance = nullptr;
 };

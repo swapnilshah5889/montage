@@ -4,8 +4,10 @@
 #include "Project.h"
 #include "ai/AdStyles.h"
 #include "ai/Brand.h"
+#include "ai/Finishing.h"
 #include "ai/EditPlan.h"
 #include "ai/EditorTools.h"
+#include "ai/Generators.h"
 #include "ai/Keychain.h"
 #include "ai/PlanGuards.h"
 #include "ai/Prompts.h"
@@ -39,13 +41,17 @@ QVariant ChatModel::data(const QModelIndex &index, int role) const
     case KindRole: return it.kind;
     case TextRole: return it.text;
     case PendingRole: return it.pending;
+    case ProgressRole: return it.progress;
+    case DetailRole: return it.detail;
+    case StateRole: return it.state;
     }
     return {};
 }
 
 QHash<int, QByteArray> ChatModel::roleNames() const
 {
-    return {{KindRole, "kind"}, {TextRole, "text"}, {PendingRole, "pending"}};
+    return {{KindRole, "kind"},         {TextRole, "text"},     {PendingRole, "pending"},
+            {ProgressRole, "progress"}, {DetailRole, "detail"}, {StateRole, "phase"}};
 }
 
 int ChatModel::add(const QString &kind, const QString &text, bool pending)
@@ -76,6 +82,24 @@ void ChatModel::setPending(int row, bool pending)
     if (row < 0 || row >= m_items.size()) return;
     m_items[row].pending = pending;
     emit dataChanged(index(row), index(row), {PendingRole});
+}
+
+void ChatModel::setProgress(int row, double fraction, const QString &detail)
+{
+    if (row < 0 || row >= m_items.size()) return;
+    m_items[row].progress = fraction;
+    if (!detail.isEmpty()) m_items[row].detail = detail;
+    emit dataChanged(index(row), index(row), {ProgressRole, DetailRole});
+}
+
+void ChatModel::setState(int row, const QString &state, const QString &detail)
+{
+    if (row < 0 || row >= m_items.size()) return;
+    m_items[row].state = state;
+    m_items[row].detail = detail;
+    m_items[row].pending = state == QLatin1String("running");
+    if (state == QLatin1String("done")) m_items[row].progress = 1;
+    emit dataChanged(index(row), index(row), {StateRole, DetailRole, PendingRole, ProgressRole});
 }
 
 void ChatModel::clear()
@@ -154,6 +178,7 @@ QString describeCall(const ToolCall &c)
     if (n == QLatin1String("find_media")) return QStringLiteral("Looking in ") + c.input.value("folder").toString();
     if (n == QLatin1String("import_media")) return QStringLiteral("Importing media");
     if (n == QLatin1String("export_video")) return QStringLiteral("Exporting the video");
+    if (n == QLatin1String("generate_media")) return QStringLiteral("Generating media");
     return n;
 }
 
@@ -176,6 +201,25 @@ Agent::Agent(Project *project, Exporter *exporter, QObject *parent)
 {
     s_instance = this;
     loadProfiles();
+
+    // One chat row per generated file, with live progress.
+    Generators *gen = m_tools->generators();
+    connect(gen, &Generators::itemStarted, this, [this](int i, int count, const QString &label) {
+        const int row = m_chat->add("generate", label, true);
+        m_genRows.insert(i, row);
+        m_chat->setState(row, "running", QStringLiteral("Starting"));
+        m_chat->setProgress(row, 0, {});
+        setStatus(count > 1 ? QStringLiteral("Generating %1 of %2…").arg(i + 1).arg(count) : QStringLiteral("Generating…"));
+    });
+    connect(gen, &Generators::itemProgress, this, [this](int i, double fraction, const QString &note) {
+        m_chat->setProgress(m_genRows.value(i, -1), fraction, note);
+    });
+    connect(gen, &Generators::itemFinished, this, [this](int i, const GenResult &r) {
+        const int row = m_genRows.value(i, -1);
+        if (r.ok) m_chat->setState(row, "done", QFileInfo(r.path).fileName());
+        else m_chat->setState(row, r.cancelled ? "cancelled" : "failed", r.error);
+    });
+    connect(gen, &Generators::finished, this, [this] { m_genRows.clear(); });
 }
 
 Agent::~Agent() = default;
@@ -412,6 +456,8 @@ void Agent::send(const QString &text)
     m_project->beginUndoGroup();
     m_request = request;
     m_rounds = 0;
+    m_genFailed.clear();
+    m_lastGood = {};
     m_assistantRow = -1;
     ensureProvider();
 
@@ -433,6 +479,7 @@ void Agent::stop()
     if (!m_busy) return;
     if (m_provider) m_provider->cancel();
     if (m_exporter->running()) m_exporter->cancel();
+    m_tools->cancelGeneration();
     m_chat->add("activity", QStringLiteral("Stopped."));
     // A stopped tool loop leaves the conversation without results for its
     // last calls; start the next request in a fresh conversation.
@@ -578,6 +625,7 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
             requestPlan(QStringLiteral("Your answer was not a valid JSON object (%1). Reply with only the JSON plan.").arg(error));
             return;
         }
+        if (fallBackToLastGood()) return;
         m_chat->add("error", QStringLiteral("The model didn't produce a usable plan. Try rephrasing, or a larger model."));
         finish(false, {});
         return;
@@ -595,8 +643,48 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
     QStringList notes;
     const QStringList kept = keepUnrequested(m_request, currentPlan, current, index, &plan);
     if (!kept.isEmpty()) notes << QStringLiteral("kept %1 unchanged").arg(kept.join(", "));
+    notes += requestedGeneration(m_request, currentPlan, current, index, &plan);
+    if (!m_genFailed.isEmpty()) {  // a backend that failed this request isn't asked again on a fix-up round
+        QJsonArray items;
+        for (const QJsonValue &v : plan.value("generate").toArray())
+            if (!m_genFailed.contains(v.toObject().value("kind").toString())) items.append(v);
+        plan.insert("generate", items);
+        notes.removeIf([&](const QString &n) {
+            return std::any_of(m_genFailed.cbegin(), m_genFailed.cend(), [&](const QString &k) { return n.contains(k); });
+        });
+    }
+    if (plan.value("generate").toArray().isEmpty()) {
+        bindGenerated({}, current, &plan);  // drops references to media nobody is making
+        buildPlan(modelPlan, plan, notes, {});
+        return;
+    }
+    // Make the media first (the same request reuses its files), then build.
+    m_tools->resolveGenerated(plan, [this, modelPlan, notes](const GenResolution &r) mutable {
+        if (!m_busy) return;
+        if (r.cancelled) {
+            finish(false, {});
+            return;
+        }
+        for (const QString &e : r.errors) m_chat->add("error", e);
+        m_genFailed += r.failedKinds;
+        notes.removeIf([&](const QString &n) {  // no "added a generated image" when there is none
+            return std::any_of(r.failedKinds.cbegin(), r.failedKinds.cend(), [&](const QString &k) { return n.contains(k); });
+        });
+        buildPlan(modelPlan, r.plan, notes, r.generated);
+    });
+}
+
+void Agent::buildPlan(const QJsonObject &modelPlan, QJsonObject plan, QStringList notes, const QStringList &generated)
+{
+    const Draft &current = m_project->draft();
+    const MediaIndex index(current);
+    const QJsonObject currentPlan = planFromDraft(current, index);
+    notes += placeGenerated(generated, m_request, current, index, &plan);
+    // A colour the request names wins over the model's take on it ("dark blue" is #00008B,
+    // not the model's navy), unless the request gives an exact code.
     const QString bg = requestedBackground(m_request);
-    if (!bg.isEmpty() && parseColor(plan.value("background").toString()).isEmpty()) {
+    static const QRegularExpression hexCode(QStringLiteral("#[0-9a-fA-F]{3,8}\\b"));
+    if (!bg.isEmpty() && parseColor(plan.value("background").toString()) != bg && !hexCode.match(m_request).hasMatch()) {
         plan.insert("background", bg);
         notes << QStringLiteral("set the background to %1").arg(bg);
     }
@@ -604,8 +692,10 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
     if (wanted > 0 && fitToLength(wanted, current, index, &plan))
         notes << QStringLiteral("fitted the clips to %1 seconds").arg(wanted);
     if (addAdMusic(m_request, currentPlan, current, index, &plan)) notes << QStringLiteral("added music under the ad");
+    if (duckUnderVoiceover(m_request, current, index, &plan)) notes << QStringLiteral("the music dips while the voiceover speaks");
     if (snapEndTexts(m_request, currentPlan, &plan)) notes << QStringLiteral("moved the end text to finish with the video");
     notes += applyObviousFeatures(m_request, current, index, &plan);
+    notes += applySmartRequests(m_request, current, index, &plan);
     if (const QStringList formats = requestedFormats(m_request); !formats.isEmpty()) {
         plan.insert("export", true);
         plan.insert("export_formats", QJsonArray::fromStringList(formats));
@@ -618,6 +708,7 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
     const QString feedback = report.ok() ? planFeedback(currentPlan, plan, next.duration() / 1e6) : report.text();
     if (!feedback.isEmpty() && m_attempts < 2) {
         ++m_attempts;
+        if (report.ok()) m_lastGood = {modelPlan, plan, notes + report.warnings, next, true};
         QString first;
         for (const QString &line : feedback.split('\n')) {
             if (line.trimmed().isEmpty() || line.endsWith(':')) continue;
@@ -629,11 +720,41 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
         return;
     }
     if (!report.ok()) {
+        if (fallBackToLastGood()) return;
         m_chat->add("error", QStringLiteral("Couldn't apply the plan:\n") + report.errors.join('\n'));
         finish(false, {});
         return;
     }
+    finishBuilt(modelPlan, plan, notes + report.warnings, next);
+}
 
+bool Agent::fallBackToLastGood()
+{
+    if (!m_lastGood.valid) return false;
+    const GoodPlan good = m_lastGood;
+    m_lastGood = {};
+    m_chat->add("activity", QStringLiteral("The model's fix didn't work out, so its earlier plan was used."));
+    finishBuilt(good.modelPlan, good.plan, good.notes, good.draft);
+    return true;
+}
+
+void Agent::finishBuilt(const QJsonObject &modelPlan, const QJsonObject &plan, const QStringList &notes, const Draft &next)
+{
+    // Steps that need the media itself (cutting to the beat, captions) run off the UI thread.
+    if (needsFinishing(next)) {
+        setStatus(next.captions.isEmpty() ? QStringLiteral("Cutting to the beat…") : QStringLiteral("Listening for captions…"));
+        m_tools->finishAsync(next, [this, modelPlan, plan, notes](const Draft &done, QStringList more, QStringList problems) {
+            if (!m_busy) return;
+            for (const QString &p : problems) m_chat->add("activity", p);
+            applyBuilt(modelPlan, plan, notes + more, done);
+        });
+        return;
+    }
+    applyBuilt(modelPlan, plan, notes, next);
+}
+
+void Agent::applyBuilt(const QJsonObject &modelPlan, const QJsonObject &plan, const QStringList &notes, const Draft &next)
+{
     m_project->applyDraft(next);
     QString reply = plan.value("reply").toString().trimmed();
     if (reply.isEmpty()) reply = QStringLiteral("Done.");
@@ -643,8 +764,9 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
         reply.replace(QRegularExpression(QStringLiteral("\\b%1\\b").arg(QRegularExpression::escape(modelStyle)),
                                          QRegularExpression::CaseInsensitiveOption), next.style);
     m_chat->add("assistant", reply);
-    notes += report.warnings;
     if (!notes.isEmpty()) m_chat->add("activity", QStringLiteral("Adjusted: ") + notes.join("; "));
+    if (const QString offer = musicOffer(m_request, plan, m_project->draft(), MediaIndex(m_project->draft())); !offer.isEmpty())
+        m_chat->add("activity", offer);
     m_history.append({m_request, reply});
 
     if (plan.value("export").toBool()) {
@@ -766,9 +888,10 @@ QString Agent::planFeedback(const QJsonObject &current, const QJsonObject &plan,
         static const QRegularExpression quoted(QStringLiteral("[\"“]([^\"”]{1,80})[\"”]"));
         QString allText;
         for (const QJsonValue &t : plan.value("texts").toArray()) allText += t.toObject().value("text").toString().toLower() + '\n';
+        const QString spoken = voiceoverScript(m_request);  // heard, not shown
         for (auto it = quoted.globalMatch(m_request); it.hasNext();) {
             const QString q = it.next().captured(1).trimmed();
-            if (!q.isEmpty() && !allText.contains(q.toLower()) && !req.contains(QStringLiteral("remove")))
+            if (!q.isEmpty() && q != spoken && !allText.contains(q.toLower()) && !req.contains(QStringLiteral("remove")))
                 problems << QStringLiteral("The request asks for the text \"%1\" but no item in \"texts\" has it.").arg(q);
         }
     }

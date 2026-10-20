@@ -455,6 +455,9 @@ QJsonObject Draft::toJson() const
             if (s.speed != 1.0) so.insert("speed", s.speed);
             if (!s.curve.isEmpty()) so.insert("curve", s.curve);
             so.insert("framing", s.framing);
+            if (s.speech) so.insert("speech", true);
+            if (s.duck > 0) so.insert("duck", s.duck);
+            if (!s.origin.isEmpty()) so.insert("origin", s.origin);
             if (!s.transition.name.isEmpty())
                 so.insert("transition", QJsonObject{{"name", s.transition.name}, {"duration", double(s.transition.us)}});
             if (s.materialId == kTextMaterialId) so.insert("text", textToJson(s.text));
@@ -473,6 +476,8 @@ QJsonObject Draft::toJson() const
                                {"background", canvas.background},
                                {"locked", canvasLocked}}},
         {"style", style},
+        {"beat_sync", beatSync},
+        {"captions", captions},
         {"materials", mats},
         {"tracks", trks},
     };
@@ -491,6 +496,8 @@ Draft Draft::fromJson(const QJsonObject &obj)
     d.canvas.background = c.value("background").toString(QStringLiteral("#000000"));
     d.canvasLocked = c.value("locked").toBool(false);
     d.style = obj.value("style").toString();
+    d.beatSync = obj.value("beat_sync").toString();
+    d.captions = obj.value("captions").toString();
 
     for (const QJsonValue &v : obj.value("materials").toArray()) {
         const QJsonObject o = v.toObject();
@@ -535,6 +542,9 @@ Draft Draft::fromJson(const QJsonObject &obj)
             s.speed = std::clamp(so.value("speed").toDouble(1.0), 0.0, 16.0);
             s.curve = so.value("curve").toString();
             s.framing = so.value("framing").toString(QStringLiteral("fit"));  // drafts from before framing letterboxed
+            s.speech = so.value("speech").toBool();
+            s.duck = std::clamp(so.value("duck").toDouble(0), 0.0, 1.0);
+            s.origin = so.value("origin").toString();
             s.transition.name = so.value("transition").toObject().value("name").toString();
             s.transition.us = qint64(so.value("transition").toObject().value("duration").toDouble(500'000));
             if (so.contains("text")) s.text = textFromJson(so.value("text").toObject());

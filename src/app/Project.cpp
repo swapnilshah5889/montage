@@ -1,5 +1,8 @@
 #include "Project.h"
 
+#include "engine/Beats.h"
+#include "engine/Speech.h"
+
 #include "engine/Animation.h"
 #include "engine/Effects.h"
 #include "engine/MediaProbe.h"
@@ -9,6 +12,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QSet>
+#include <QThread>
 #include <QSize>
 #include <QStandardPaths>
 #include <algorithm>
@@ -68,6 +72,22 @@ QVariantMap segmentMap(const Draft &d, const Segment &s)
         {"speed", s.speed},
         {"curve", s.curve},
         {"framing", s.framing},
+        {"speech", s.speech},
+        {"duck", s.duck},
+        {"origin", s.origin},
+        {"beats", [&] {
+             // Beat ticks for music clips, in seconds from the clip's start.
+             QVariantList out;
+             if (!m || m->kind != MaterialKind::Audio || s.speech) return out;
+             const BeatGrid g = beatGrid(*m);
+             for (double b : g.beats) {
+                 const double local = b - s.sourceStart / 1e6;
+                 if (local < 0) continue;
+                 if (local * 1e6 > s.duration || out.size() > 600) break;
+                 out << local;
+             }
+             return out;
+         }()},
         {"transition", s.transition.name},
         {"transitionSec", s.transition.us / 1e6},
         {"effects", [&] {
@@ -512,6 +532,8 @@ static void applyProperty(Segment &s, const QString &key, double v)
     else if (key == QLatin1String("y")) s.transform.y = std::clamp(v, -2.0, 2.0);
     else if (key == QLatin1String("scale")) s.transform.scale = std::clamp(v, 0.05, 8.0);
     else if (key == QLatin1String("rotation")) s.transform.rotation = std::clamp(v, -720.0, 720.0);
+    else if (key == QLatin1String("duck")) s.duck = std::clamp(v, 0.0, 1.0);
+    else if (key == QLatin1String("speech")) s.speech = v > 0.5;
 }
 
 template <typename F>
@@ -800,6 +822,80 @@ void Project::setFraming(const QString &segmentId, const QString &framing)
         if (!s || owner->role != TrackRole::Main || s->framing == framing) return false;
         s->framing = framing;
         return true;
+    });
+}
+
+QString Project::beatSync() const
+{
+    return m_draft.beatSync;
+}
+
+void Project::setBeatSync(const QString &mode)
+{
+    const QString m = mode == QLatin1String("beats") || mode == QLatin1String("bars") ? mode : QString();
+    int moved = 0;
+    const QString music = musicSegment(m_draft);
+    edit([&](Draft &d) {
+        if (d.beatSync == m && m.isEmpty()) return false;
+        d.beatSync = m;
+        if (!m.isEmpty() && !music.isEmpty()) moved = snapCutsToBeats(d, music, m);
+        return true;
+    });
+    if (m.isEmpty()) return;
+    if (music.isEmpty()) emit message(QStringLiteral("Add music to cut to the beat"));
+    else emit message(moved ? QStringLiteral("Moved %1 cut%2 onto the %3").arg(moved).arg(moved == 1 ? "" : "s").arg(m == QLatin1String("bars") ? "bars" : "beat")
+                            : QStringLiteral("The cuts are already on the beat"));
+}
+
+void Project::autoCaptions(const QString &style)
+{
+    if (m_captioning) return;
+    if (const QString problem = whisperProblem(); !problem.isEmpty()) {
+        emit message(problem);
+        return;
+    }
+    m_captioning = true;
+    emit captioningChanged();
+    struct Job {
+        Draft draft;
+        int count = 0;
+        QString error;
+    };
+    auto *job = new Job{m_draft};
+    QThread *worker = QThread::create([job, style] { job->count = addCaptions(job->draft, style, &job->error); });
+    connect(worker, &QThread::finished, this, [this, job, worker, style] {
+        m_captioning = false;
+        emit captioningChanged();
+        if (job->count > 0) {
+            // Bring over just the captions: the timeline may have changed meanwhile.
+            edit([&](Draft &d) {
+                removeCaptions(d);
+                for (const Track &t : job->draft.tracks) {
+                    bool captions = !t.segments.isEmpty();
+                    for (const Segment &s : t.segments) captions &= s.origin == QLatin1String("captions");
+                    if (captions) d.tracks.append(t);
+                }
+                d.ensureTextMaterial();
+                d.captions = style;
+                d.normalize();
+                return true;
+            });
+            emit message(QStringLiteral("Added %1 caption%2").arg(job->count).arg(job->count == 1 ? "" : "s"));
+        } else {
+            emit message(job->error.isEmpty() ? QStringLiteral("No speech found to caption") : job->error);
+        }
+        delete job;
+        worker->deleteLater();
+    });
+    worker->start();
+}
+
+void Project::clearCaptions()
+{
+    edit([](Draft &d) {
+        const bool had = removeCaptions(d) > 0 || !d.captions.isEmpty();
+        d.captions.clear();
+        return had;
     });
 }
 

@@ -2,6 +2,9 @@
 // Usage: project_test <media dir containing clipA.mp4 clipB.mov music.mp3 photo.png>
 
 #include "app/Project.h"
+#include "engine/Beats.h"
+#include "engine/MediaProbe.h"
+#include "engine/Speech.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -31,6 +34,102 @@ static QList<qint64> starts(const Track &t)
     QList<qint64> out;
     for (const Segment &s : t.segments) out << s.start;
     return out;
+}
+
+// Beat sync, ducking and captions on real audio (beat.mp3 is a 120 BPM loop,
+// voiceover.wav says "Fresh bread every morning. Order yours today.").
+static void smartTests(const QDir &media)
+{
+    Material beat;
+    QString err;
+    if (!probeMedia(media.filePath("beat.mp3"), QDir::tempPath(), &beat, &err)) {
+        std::fprintf(stderr, "skipping smart tests: %s (run tests/make_media.sh)\n", qPrintable(err));
+        return;
+    }
+    const BeatGrid grid = beatGrid(beat);
+    CHECK(std::abs(grid.bpm - 120) < 1.5);
+    bool onHalfSeconds = grid.beats.size() > 40;
+    for (double b : grid.beats.mid(1)) onHalfSeconds &= std::abs(b * 2 - std::round(b * 2)) < 0.04;
+    CHECK(onHalfSeconds);
+
+    // Cuts at 2.8 s and 5.9 s land on the beats at 3 s and 6 s; a text on a cut follows it.
+    Draft d;
+    beat.id = "beat";
+    d.materials.append(beat);
+    Material clip;
+    probeMedia(media.filePath("beach.mp4"), QDir::tempPath(), &clip, &err);
+    clip.id = "clip";
+    d.materials.append(clip);
+    for (qint64 len : {2'800'000LL, 3'100'000LL, 4'100'000LL}) {
+        Segment s;
+        s.id = Draft::newId();
+        s.materialId = "clip";
+        s.duration = len;
+        d.mainTrack().segments.append(s);
+    }
+    d.ensureTextMaterial();
+    Track texts{Draft::newId(), TrackRole::Overlay, {}};
+    Segment cta;
+    cta.id = "cta";
+    cta.materialId = kTextMaterialId;
+    cta.start = 5'900'000;
+    cta.duration = 4'100'000;
+    texts.segments.append(cta);
+    d.tracks.append(texts);
+    Track music{Draft::newId(), TrackRole::Audio, {}};
+    Segment song;
+    song.id = "song";
+    song.materialId = "beat";
+    song.duration = 10'000'000;
+    music.segments.append(song);
+    d.tracks.append(music);
+    d.normalize();
+    CHECK(musicSegment(d) == "song");
+    CHECK(snapCutsToBeats(d, "song", "beats") == 2);
+    const QList<Segment> &main = d.mainTrack().segments;
+    CHECK(std::abs(main[1].start - 3'000'000) < 60'000 && std::abs(main[2].start - 6'000'000) < 60'000);
+    CHECK(main.last().end() == 10'000'000);
+    CHECK(std::abs(d.segment("cta")->start - 6'000'000) < 60'000);
+
+    // Ducking: the voice is talking at about 1-3.5 s on the timeline.
+    Material voice;
+    if (!probeMedia(media.filePath("voiceover.wav"), QDir::tempPath(), &voice, &err)) return;
+    voice.id = "voice";
+    d.materials.append(voice);
+    Track vo{Draft::newId(), TrackRole::Audio, {}};
+    Segment talk;
+    talk.id = "talk";
+    talk.materialId = "voice";
+    talk.start = 1'000'000;
+    talk.duration = voice.durationUs;
+    talk.speech = true;
+    vo.segments.append(talk);
+    d.tracks.append(vo);
+    const auto spans = speechSpans(d);
+    CHECK(!spans.isEmpty() && spans.first().first < 1'400'000 && spans.last().second > 3'000'000);
+    CHECK(duckAmount(spans, 2'000'000) > 0.99 && duckAmount(spans, 8'000'000) == 0);
+    CHECK(musicSegment(d) == "song");  // the voice isn't music
+
+    // Captions (needs whisper.cpp and a model; skipped without them).
+    if (!whisperProblem().isEmpty()) {
+        std::fprintf(stderr, "skipping caption test: %s\n", qPrintable(whisperProblem()));
+        return;
+    }
+    QString captionError;
+    const int n = addCaptions(d, "kinetic-caption", &captionError);
+    CHECK(n >= 2);
+    QString said;
+    qint64 first = -1;
+    for (const Track &t : d.tracks)
+        for (const Segment &s : t.segments)
+            if (s.origin == "captions") {
+                said += s.text.text + ' ';
+                if (first < 0) first = s.start;
+            }
+    CHECK(said.contains("bread", Qt::CaseInsensitive) && said.contains("today", Qt::CaseInsensitive));
+    CHECK(first >= 1'000'000 && first < 1'600'000);
+    CHECK(addCaptions(d, "caption") == n);  // again: replaced, not added
+    CHECK(removeCaptions(d) == n);
 }
 
 int main(int argc, char **argv)
@@ -217,6 +316,8 @@ int main(int argc, char **argv)
     p.deleteSelected();
     CHECK(!p.draft().segment(segB));
     CHECK(p.selectedId().isEmpty());
+
+    smartTests(media);
 
     std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "all project tests passed", failures,
                 failures == 1 ? "" : "s");

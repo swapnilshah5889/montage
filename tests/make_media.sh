@@ -14,6 +14,15 @@ f -f lavfi -i "mandelbrot=size=1280x720:rate=30" -f lavfi -i "sine=frequency=550
   -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$out/forest.mp4"
 f -f lavfi -i "sine=frequency=330:duration=60" -c:a libmp3lame "$out/song.mp3"
 f -f lavfi -i "color=c=0x1fd1c1:size=600x600:duration=1" -frames:v 1 "$out/logo.png"
+# 120 BPM drum loop (kick on every beat, hats in between) for beat sync
+f -f lavfi -i "aevalsrc='0.9*sin(2*PI*55*t)*exp(-25*mod(t,0.5)) + 0.25*(random(0)-0.5)*exp(-60*mod(t+0.25,0.5))':s=44100:d=30" \
+  -ac 2 -c:a libmp3lame -q:a 2 "$out/beat.mp3"
+# Spoken words for captions and ducking (macOS text to speech)
+if command -v say >/dev/null 2>&1; then
+  say -o "$out/voiceover.aiff" "Fresh bread every morning. Order yours today."
+  f -i "$out/voiceover.aiff" -ar 44100 -ac 1 "$out/voiceover.wav"
+  rm -f "$out/voiceover.aiff"
+fi
 
 # Legacy names used by project_test
 f -f lavfi -i "testsrc2=size=1920x1080:rate=30:duration=4" -f lavfi -i "sine=frequency=440:duration=4" \

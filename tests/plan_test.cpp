@@ -1,16 +1,23 @@
 // AI-layer tests that need no real model:
 //  - edit plans: round trip, validation, leniency
 //  - both chat adapters against a local mock server replaying streamed responses
+//  - generated media: plan field, resolution with fake generators, guards
 
 #include "ai/AdStyles.h"
 #include "ai/Brand.h"
+#include "engine/Speech.h"
+#include "ai/Finishing.h"
 #include "ai/ChatProvider.h"
 #include "ai/EditPlan.h"
+#include "ai/Generators.h"
 #include "ai/PlanGuards.h"
 #include "engine/Animation.h"
 
 #include <QCoreApplication>
 #include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
+#include <QTemporaryDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTcpServer>
@@ -257,6 +264,12 @@ static void guardTests()
     plan2.insert("main", QJsonDocument::fromJson(R"([{"media": "m2", "from": 0, "to": 4}])").array());
     CHECK(keepUnrequested("remove the beach clip", current, base, index, &plan2).isEmpty() || plan2.value("main").toArray().size() == 1);
     CHECK(keepUnrequested("start over with just the city", current, base, index, &plan2).isEmpty());
+    // Words inside quotes are on-screen text, not instructions: "Look at this" isn't a request about looks.
+    QJsonObject quoted = plan;
+    quoted.insert("main", QJsonDocument::fromJson(R"([{"media": "m1", "from": 0, "to": 6}, {"media": "m2", "from": 0, "to": 6},
+        {"media": "m1", "from": 6, "to": 12}])").array());
+    keepUnrequested("Add a caption \"Look at this\" from second 4 to second 8", current, base, index, &quoted);
+    CHECK(quoted.value("main") == current.value("main"));
 
     // Fit to a requested length: videos absorb the change, music follows the end.
     QJsonObject fit = QJsonDocument::fromJson(R"({"main": [{"media": "m2", "from": 0, "to": 5}, {"media": "m1", "from": 0, "to": 6},
@@ -753,6 +766,17 @@ static void styleTests()
     QJsonObject warmTitle = twoClips;
     CHECK(applyObviousFeatures("make the title warm yellow", base, index, &warmTitle).isEmpty());
 
+    // Hits on a named cut are placed by the app.
+    QJsonObject cutFlash = twoClips;
+    CHECK(applyObviousFeatures("Add a flash when the second clip starts", base, index, &cutFlash).size() == 1);
+    CHECK(cutFlash.value("moments").toArray()[0].toObject().value("at").toDouble() == 5);
+    QJsonObject everyCut = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 3}, {"media": "m2", "from": 0, "to": 3},
+        {"media": "m1", "from": 4, "to": 7}]})").object();
+    applyObviousFeatures("add a zoom punch on every cut", base, index, &everyCut);
+    CHECK(everyCut.value("moments").toArray().size() == 2 && everyCut.value("moments").toArray()[1].toObject().value("at").toDouble() == 6);
+    QJsonObject flashTitle = twoClips;
+    CHECK(applyObviousFeatures("make the title flash", base, index, &flashTitle).isEmpty());
+
     // Multi-format exports.
     CHECK(requestedFormats("export it for tiktok and youtube") == QStringList({"9:16", "16:9"}));
     CHECK(requestedFormats("export for all platforms").size() == 4);
@@ -837,6 +861,390 @@ static void brandTests()
     CHECK(card.value("background") == "#FF5A1F");
 }
 
+// Stands in for ComfyUI / Kokoro / ACE-Step: writes a placeholder file, or
+// holds until cancelled.
+class FakeBackend : public GeneratorBackend
+{
+public:
+    using GeneratorBackend::GeneratorBackend;
+    QStringList made;
+    bool hold = false;
+    QString failWith;
+
+    void generate(const GenRequest &r, const QString &out) override
+    {
+        made << r.label();
+        emit progress(0.5, "halfway");
+        if (hold) return;
+        if (!failWith.isEmpty()) {
+            emit finished({false, false, {}, failWith});
+            return;
+        }
+        QFile f(out);
+        f.open(QIODevice::WriteOnly);
+        f.write("x");
+        emit finished({true, false, out, {}});
+    }
+    void cancel() override
+    {
+        if (hold) emit finished({false, true, {}, "Cancelled"});
+    }
+};
+
+static void generationTests()
+{
+    // The plan field.
+    const QJsonObject schema = planSchema();
+    const QJsonObject gen = schema.value("properties").toObject().value("generate").toObject().value("items").toObject();
+    CHECK(gen.value("properties").toObject().value("kind").toObject().value("enum").toArray().size() == 3);
+    CHECK(gen.value("properties").toObject().value("voice").toObject().value("enum").toArray().contains("bm_george"));
+
+    QStringList warnings;
+    const QList<GenRequest> reqs = generateRequests(QJsonDocument::fromJson(R"({"generate": [
+        {"kind": "image", "prompt": "candles on a wooden table"},
+        {"kind": "voice", "text": "Light up your evenings", "voice": "british man", "as": "vo"},
+        {"kind": "music", "prompt": "soft guitar", "seconds": 400, "as": "m2"},
+        {"kind": "video", "prompt": "x"},
+        {"kind": "voiceover"}]})").object(), &warnings);
+    CHECK(reqs.size() == 3 && warnings.size() == 2);
+    CHECK(reqs[0].as == "g1" && reqs[1].as == "vo" && reqs[2].as == "g3");  // "m2" would clash with media ids
+    CHECK(reqs[1].kind == "voiceover" && reqs[1].voice == "bm_george" && reqs[2].seconds == 180);
+    CHECK(voiceFor("a deep male voice") == "am_michael" && voiceFor("af_bella") == "af_bella" && voiceFor("hello").isEmpty());
+
+    // File names are stable, describe the request and identify generated files.
+    const QString name = reqs[1].fileName();
+    CHECK(name.startsWith("voiceover-light-up-your-evenings-") && name.endsWith(".wav") && name == reqs[1].fileName());
+    GenRequest other = reqs[1];
+    other.voice = "af_heart";
+    CHECK(other.fileName() != name);
+    CHECK(generatedKind(name) == "voiceover" && generatedKind(reqs[0].fileName()) == "image" && generatedKind("song.mp3").isEmpty());
+    Material vo;
+    vo.kind = MaterialKind::Audio;
+    vo.name = name;
+    Material narration = vo;
+    narration.name = "Narration take 2.wav";
+    Material song = vo;
+    song.name = "song.mp3";
+    CHECK(isVoiceover(vo) && isVoiceover(narration) && !isVoiceover(song));
+
+    // Binding: g-names become media ids, voiceovers play in full, failed items drop out.
+    Draft d = sampleDraft();  // m1 beach, m2 city, m3 song, m4 logo
+    auto addMaterial = [&](const QString &file, MaterialKind kind, double secs) {
+        Material m;
+        m.id = Draft::newId();
+        m.kind = kind;
+        m.path = "/gen/" + file;
+        m.name = file;
+        m.durationUs = qint64(secs * 1e6);
+        m.hasAudio = kind == MaterialKind::Audio;
+        m.hasVideo = kind == MaterialKind::Image;
+        m.width = kind == MaterialKind::Image ? 1344 : 0;
+        m.height = kind == MaterialKind::Image ? 768 : 0;
+        d.materials.append(m);
+        return MediaIndex(d).alias(m.id);
+    };
+    const QString img = addMaterial(reqs[0].fileName(), MaterialKind::Image, 0);
+    const QString voice = addMaterial(name, MaterialKind::Audio, 1.9);
+    CHECK(img == "m5" && voice == "m6");
+    QJsonObject bound = QJsonDocument::fromJson(R"({"generate": [{"kind": "image", "prompt": "candles", "as": "g1"},
+        {"kind": "voiceover", "text": "Light up", "as": "g2"}, {"kind": "music", "prompt": "soft", "as": "g3"}],
+        "main": [{"media": "g1", "from": 0, "to": 10}],
+        "audio": [{"media": "G2", "at": 0.5, "from": 0, "to": 3, "volume": 1}, {"media": "g3", "at": 0, "from": 0, "to": 10, "volume": 0.3}]})").object();
+    bindGenerated({{"g1", img}, {"g2", voice}}, d, &bound);  // the music failed
+    CHECK(!bound.contains("generate"));
+    CHECK(bound.value("main").toArray()[0].toObject().value("media") == "m5");
+    const QJsonArray boundAudio = bound.value("audio").toArray();
+    CHECK(boundAudio.size() == 1 && boundAudio[0].toObject().value("media") == "m6" && boundAudio[0].toObject().value("to").toDouble() == 1.9);
+
+    // A name the model never listed takes the unused made file of the right kind.
+    QJsonObject stray = QJsonDocument::fromJson(R"({"generate": [{"kind": "voiceover", "text": "Hi", "as": "g1"}],
+        "audio": [{"media": "g2", "at": 5, "from": 0, "to": 5, "volume": 1}], "main": [{"media": "g3", "from": 0, "to": 2}]})").object();
+    bindGenerated({{"g1", voice}}, d, &stray);
+    CHECK(stray.value("audio").toArray()[0].toObject().value("media") == "m6" && stray.value("audio").toArray()[0].toObject().value("at") == 5);
+    CHECK(stray.value("main").toArray().isEmpty());
+    // Names used in each other's places swap: the voiceover's name in "main", the image's in "audio".
+    QJsonObject swapped = QJsonDocument::fromJson(R"({"main": [{"media": "g1", "from": 0, "to": 5}],
+        "audio": [{"media": "g2", "at": 0, "from": 0, "to": 2, "volume": 1}]})").object();
+    bindGenerated({{"g1", voice}, {"g2", img}}, d, &swapped);
+    CHECK(swapped.value("main").toArray()[0].toObject().value("media") == "m5" && swapped.value("audio").toArray()[0].toObject().value("media") == "m6");
+
+    // The runner with fake backends: progress, files on disk, reuse, failures.
+    QTemporaryDir dir;
+    GeneratorConfig config = GeneratorConfig::load();
+    config.outputDir = dir.path();
+    config.freeMemory = false;
+    Generators gens(config, nullptr);
+    auto *image = new FakeBackend;
+    auto *speech = new FakeBackend;
+    auto *music = new FakeBackend;
+    gens.setBackend("image", image);
+    gens.setBackend("voiceover", speech);
+    gens.setBackend("music", music);
+    QList<double> progress;
+    QObject::connect(&gens, &Generators::itemProgress, [&](int, double f, const QString &) { progress << f; });
+    QList<GenResult> results;
+    bool cancelled = true;
+    QObject::connect(&gens, &Generators::finished, [&](const QList<GenResult> &r, bool c) {
+        results = r;
+        cancelled = c;
+    });
+    music->failWith = "ACE-Step crashed";
+    gens.run(reqs);
+    CHECK(waitFor(&gens, &Generators::finished));
+    CHECK(!cancelled && results.size() == 3 && results[0].ok && results[1].ok && !results[2].ok);
+    CHECK(results[2].error == "ACE-Step crashed" && progress.size() == 3);
+    CHECK(QFileInfo(results[1].path).fileName() == name && QFileInfo::exists(results[1].path));
+    gens.run(reqs.mid(0, 2));  // same requests: the files are reused, nothing runs again
+    CHECK(waitFor(&gens, &Generators::finished));
+    CHECK(image->made.size() == 1 && speech->made.size() == 1 && results[0].ok && results[1].ok);
+
+    // Cancel stops the running item and skips the rest.
+    GenRequest slow = reqs[0];
+    slow.prompt = "a slow one";
+    image->hold = true;
+    gens.run({slow, reqs[2]});
+    QTimer::singleShot(50, &gens, [&] { gens.cancel(); });
+    CHECK(waitFor(&gens, &Generators::finished));
+    CHECK(cancelled && results[0].cancelled && results[1].cancelled && music->made.size() == 1);
+    image->hold = false;
+    music->failWith.clear();
+
+    // Guards: the candle-shop request with a model that forgot most of it.
+    const QString candle = "make a 10 second ad for my candle shop with a cozy background image, a voiceover saying "
+                           "'Light up your evenings' and soft music";
+    Draft empty;
+    const MediaIndex none(empty);
+    QJsonObject plan = QJsonDocument::fromJson(R"({"reply": "Made it.", "aspect": "keep", "style": "elegant", "main": [], "audio": [],
+        "texts": [{"text": "Cozy Candles", "at": 0, "duration": 3, "style": "headline"}, {"text": "Shop now", "at": 7, "duration": 3, "style": "cta"}],
+        "generate": [{"kind": "voiceover", "text": "Light up your evening!", "as": "g1"}]})").object();
+    const QStringList notes = requestedGeneration(candle, QJsonObject{}, empty, none, &plan);
+    const QList<GenRequest> wanted = generateRequests(plan);
+    CHECK(wanted.size() == 3 && notes.size() == 3);
+    CHECK(wanted[0].kind == "voiceover" && wanted[0].text == "Light up your evenings");  // the user's words, not the model's
+    CHECK(wanted[1].kind == "image" && wanted[1].prompt.startsWith("cozy candle shop") && wanted[1].as == "g2");
+    CHECK(wanted[2].kind == "music" && wanted[2].seconds == 10 && wanted[2].prompt.contains("acoustic guitar"));
+    CHECK(voiceoverScript(candle) == "Light up your evenings");
+    // No list, but references like the prompt's example: the added items take those names.
+    QJsonObject refs = QJsonDocument::fromJson(R"({"main": [{"media": "g1", "from": 0, "to": 10}],
+        "audio": [{"media": "g3", "at": 0, "from": 0, "to": 10, "volume": 0.5}, {"media": "g2", "at": 0.5, "from": 0, "to": 3, "volume": 1}]})").object();
+    requestedGeneration(candle, QJsonObject{}, empty, none, &refs);
+    const QList<GenRequest> byRef = generateRequests(refs);
+    CHECK(byRef.size() == 3 && byRef[0].kind == "image" && byRef[0].as == "g1" && byRef[1].kind == "voiceover" && byRef[1].as == "g2"
+          && byRef[2].kind == "music" && byRef[2].as == "g3");
+    // Only the music is referenced: the voiceover gets a fresh name instead of the music's slot.
+    QJsonObject musicOnly = QJsonDocument::fromJson(R"({"main": [{"media": "g1", "from": 0, "to": 10}],
+        "audio": [{"media": "g3", "at": 0, "from": 0, "to": 10, "volume": 0.5}]})").object();
+    requestedGeneration(candle, QJsonObject{}, empty, none, &musicOnly);
+    const QList<GenRequest> one = generateRequests(musicOnly);
+    CHECK(one.size() == 3 && one[1].kind == "voiceover" && one[1].as == "g2" && one[2].kind == "music" && one[2].as == "g3");
+
+    // Resolution with the fakes, then placement, ducking and the build: a working timeline.
+    Draft project;
+    auto import = [&](const QStringList &paths) -> const Draft & {
+        for (const QString &p : paths) {
+            if (std::any_of(project.materials.cbegin(), project.materials.cend(), [&](const Material &m) { return m.path == p; })) continue;
+            Material m;
+            m.id = Draft::newId();
+            m.path = p;
+            m.name = QFileInfo(p).fileName();
+            const QString kind = generatedKind(m.name);
+            m.kind = kind == "image" ? MaterialKind::Image : MaterialKind::Audio;
+            m.durationUs = kind == "voiceover" ? 1'850'000 : kind == "music" ? 10'000'000 : 0;
+            m.hasAudio = m.kind == MaterialKind::Audio;
+            m.hasVideo = !m.hasAudio;
+            m.width = m.hasVideo ? 1344 : 0;
+            m.height = m.hasVideo ? 768 : 0;
+            project.materials.append(m);
+        }
+        return project;
+    };
+    GenResolution res;
+    bool resolved = false;
+    gens.resolve(plan, project, import, [&](const GenResolution &r) {
+        res = r;
+        resolved = true;
+    });
+    QEventLoop loop;
+    QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+    QObject::connect(&gens, &Generators::finished, &loop, &QEventLoop::quit, Qt::QueuedConnection);
+    if (!resolved) loop.exec();
+    CHECK(resolved && !res.cancelled && res.errors.isEmpty() && res.generated == QStringList({"m1", "m2", "m3"}));
+    CHECK(project.materials.size() == 3 && image->made.last().contains("cozy candle shop"));
+    // Items named like media ("as": "m1") before anything is imported keep their references.
+    QJsonObject named = QJsonDocument::fromJson(R"({"generate": [{"kind": "voiceover", "text": "Light up your evenings", "as": "m1"}],
+        "audio": [{"media": "m1", "at": 2, "from": 0, "to": 9, "volume": 1}]})").object();
+    Draft fresh;
+    GenResolution res2;
+    gens.resolve(named, fresh, [&](const QStringList &paths) -> const Draft & {
+        fresh.materials.append(project.materials[0]);  // the cached voiceover, now m1
+        fresh.materials[0].path = paths.value(0);
+        return fresh;
+    }, [&](const GenResolution &r) { res2 = r; });
+    waitFor(&gens, &Generators::finished, 3000);
+    QCoreApplication::processEvents();
+    CHECK(res2.generated == QStringList({"m1"}) && res2.plan.value("audio").toArray()[0].toObject().value("at") == 2);
+    QJsonObject built = res.plan;
+    const MediaIndex pindex(project);
+    const QStringList placed = placeGenerated(res.generated, candle, project, pindex, &built);
+    CHECK(placed.size() == 3);
+    CHECK(duckUnderVoiceover(candle, project, pindex, &built));
+    CHECK(!duckUnderVoiceover("make the music louder", project, pindex, &built));
+    QJsonObject quiet = built;  // a model that put the new voiceover at 0.5
+    QJsonArray qa = quiet.value("audio").toArray();
+    for (qsizetype i = 0; i < qa.size(); ++i) {
+        QJsonObject o = qa[i].toObject();
+        if (o.value("volume").toDouble() != 1) continue;
+        o.insert("volume", 0.5);
+        o.insert("to", 9);
+        qa[i] = o;
+    }
+    quiet.insert("audio", qa);
+    placeGenerated(res.generated, candle, project, pindex, &quiet);
+    bool loud = false;
+    for (const QJsonValue &v : quiet.value("audio").toArray())
+        loud |= v.toObject().value("volume").toDouble() == 1 && v.toObject().value("to").toDouble() == 1.85;
+    CHECK(loud);
+    PlanReport report;
+    const Draft ad = draftFromPlan(project, built, pindex, &report);
+    CHECK(report.ok() && std::abs(ad.duration() / 1e6 - 10) < 0.01);
+    double musicVol = -1, musicDuck = 0, voiceVol = -1, voiceStart = -1, voiceLen = 0;
+    bool voiceIsSpeech = false;
+    for (const Track &t : ad.tracks)
+        for (const Segment &s : t.segments) {
+            if (t.role != TrackRole::Audio) continue;
+            const Material *m = ad.material(s.materialId);
+            if (isVoiceover(*m)) voiceVol = s.volume, voiceStart = s.start / 1e6, voiceLen = s.duration / 1e6, voiceIsSpeech = s.speech;
+            else musicVol = s.volume, musicDuck = s.duck;
+        }
+    // Music keeps its level between phrases and dips to about 0.25 under the voice.
+    CHECK(std::abs(musicVol * musicDuck - 0.25) < 0.02 && voiceIsSpeech);
+    CHECK(voiceVol == 1 && voiceStart == 0.5 && std::abs(voiceLen - 1.85) < 0.01);
+    CHECK(ad.material(ad.tracks[0].segments[0].materialId)->kind == MaterialKind::Image);
+
+    // Not asked for: the model's extra generation is dropped; the user's own song is used instead of composing.
+    const Draft base = sampleDraft();
+    const MediaIndex bindex(base);
+    QJsonObject extra = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 5}],
+        "generate": [{"kind": "music", "prompt": "upbeat", "seconds": 5}, {"kind": "image", "prompt": "a beach"},
+                     {"kind": "voiceover", "text": "Summer"}]})").object();
+    requestedGeneration("make a 5 second video with music and the title \"Summer\"", QJsonObject{}, base, bindex, &extra);
+    CHECK(!extra.contains("generate"));
+    QJsonObject compose = QJsonObject{{"main", QJsonArray{QJsonObject{{"media", "m1"}, {"from", 0}, {"to", 5}}}}};
+    requestedGeneration("compose some new upbeat music for it", QJsonObject{}, base, bindex, &compose);
+    CHECK(generateRequests(compose).size() == 1 && generateRequests(compose)[0].seconds == 5);
+    // A voiceover with no quote reads the on-screen words.
+    QJsonObject read = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 5}],
+        "texts": [{"text": "Summer Sale", "at": 0, "duration": 2, "style": "headline"}, {"text": "Shop now", "at": 2, "duration": 3, "style": "cta"}]})").object();
+    requestedGeneration("add a female voiceover", QJsonObject{}, base, bindex, &read);
+    CHECK(generateRequests(read).size() == 1 && generateRequests(read)[0].text == "Summer Sale. Shop now." && generateRequests(read)[0].voice == "af_heart");
+    // Removing isn't asking.
+    QJsonObject removing = read;
+    requestedGeneration("remove the voiceover", QJsonObject{}, base, bindex, &removing);
+    CHECK(!removing.contains("generate"));
+
+    // Ads: a song file still goes under a voiceover; without any music, the app offers to compose some.
+    Draft withVoice = sampleDraft();
+    Material spoken = vo;
+    spoken.id = "v";
+    spoken.path = "/gen/" + name;
+    spoken.durationUs = 1'900'000;
+    spoken.hasAudio = true;
+    withVoice.materials.append(spoken);  // m5
+    const MediaIndex vindex(withVoice);
+    QJsonObject vad = QJsonDocument::fromJson(R"({"style": "energetic", "main": [{"media": "m1", "from": 0, "to": 6}],
+        "audio": [{"media": "m5", "at": 0.5, "from": 0, "to": 1.9, "volume": 1}]})").object();
+    CHECK(addAdMusic("make an ad with a voiceover", QJsonObject{}, withVoice, vindex, &vad));
+    CHECK(vad.value("audio").toArray().size() == 2 && vad.value("audio").toArray()[0].toObject().value("media") == "m3");
+    CHECK(duckUnderVoiceover("make an ad with a voiceover", withVoice, vindex, &vad));
+    CHECK(vad.value("audio").toArray()[0].toObject().value("duck").toDouble() > 0.2);
+    CHECK(vad.value("audio").toArray()[1].toObject().value("speech").toBool());
+    CHECK(musicOffer("make a 6 second ad", QJsonObject{{"style", "bold"}}, empty, none).contains("a bold track"));
+    CHECK(musicOffer("make a 6 second ad", QJsonObject{{"style", "bold"}}, base, bindex).isEmpty());  // song.mp3 is there
+    CHECK(musicOffer("make a silent 6 second ad", QJsonObject{{"style", "bold"}}, empty, none).isEmpty());
+}
+
+static void smartTests()
+{
+    const Draft base = sampleDraft();  // m1 beach 12s, m2 city 8s, m3 song 95s, m4 logo (photo)
+    const MediaIndex index(base);
+    const QJsonObject two = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 5}, {"media": "m4", "from": 0, "to": 3}],
+        "audio": [{"media": "m3", "at": 0, "from": 0, "to": 8, "volume": 0.8}]})").object();
+
+    QJsonObject p = two;
+    CHECK(applySmartRequests("cut it to the beat of the song", base, index, &p).size() == 1 && p.value("beat_sync") == "beats");
+    p = two;
+    applySmartRequests("sync the cuts to the music, every bar", base, index, &p);
+    CHECK(p.value("beat_sync") == "bars");
+    p = two;
+    p.insert("beat_sync", "beats");
+    applySmartRequests("stop syncing to the beat", base, index, &p);
+    CHECK(p.value("beat_sync") == "off");
+
+    p = two;
+    applySmartRequests("add captions", base, index, &p);
+    CHECK(p.value("captions") == "caption");
+    p = two;
+    p.insert("style", "energetic");
+    applySmartRequests("subtitle it for tiktok", base, index, &p);
+    CHECK(p.value("captions") == "kinetic-caption");
+    p = two;
+    CHECK(applySmartRequests("add a caption that says \"Fresh\"", base, index, &p).isEmpty() && !p.contains("captions"));
+    p = two;
+    p.insert("captions", "caption");
+    applySmartRequests("remove the captions", base, index, &p);
+    CHECK(p.value("captions") == "none");
+
+    p = two;
+    applySmartRequests("lower the music when she talks", base, index, &p);
+    CHECK(p.value("audio").toArray()[0].toObject().value("duck").toDouble() == 0.3);
+    CHECK(p.value("main").toArray()[0].toObject().value("speech").toBool());  // the talking is in the clip
+
+    p = two;
+    CHECK(applySmartRequests("remove the background from the photo", base, index, &p).size() == 1);
+    CHECK(p.value("main").toArray()[1].toObject().value("effects").toArray()[0].toObject().value("name") == "cutout");
+    CHECK(!p.value("main").toArray()[0].toObject().contains("effects"));
+
+    // Round trip: beat sync, captions, speech and duck survive; auto captions stay out of "texts".
+    QJsonObject full = two;
+    full.insert("beat_sync", "bars");
+    full.insert("captions", "kinetic-caption");
+    QJsonArray audio = full.value("audio").toArray();
+    QJsonObject song = audio[0].toObject();
+    song.insert("duck", 0.3);
+    audio[0] = song;
+    full.insert("audio", audio);
+    PlanReport r;
+    Draft d = draftFromPlan(base, full, index, &r);
+    CHECK(r.ok() && d.beatSync == "bars" && d.captions == "kinetic-caption" && needsFinishing(d));
+    d.ensureTextMaterial();
+    Segment auto_;
+    auto_.id = "c1";
+    auto_.materialId = kTextMaterialId;
+    auto_.origin = "captions";
+    auto_.text.text = "said";
+    auto_.duration = 1'000'000;
+    d.tracks.append(Track{"t", TrackRole::Overlay, {auto_}});
+    const QJsonObject back = planFromDraft(d, MediaIndex(d));
+    CHECK(back.value("beat_sync") == "bars" && back.value("captions") == "kinetic-caption");
+    CHECK(back.value("texts").toArray().isEmpty());
+    CHECK(back.value("audio").toArray()[0].toObject().value("duck").toDouble() == 0.3);
+    const Draft reloaded = Draft::fromJson(d.toJson());
+    CHECK(reloaded.beatSync == "bars" && reloaded.captions == "kinetic-caption" && reloaded.segment("c1")->origin == "captions");
+    full.insert("captions", "none");
+    CHECK(draftFromPlan(d, full, MediaIndex(d), &r).captions.isEmpty());
+
+    // A styled edit with music cuts on the music by default.
+    QJsonObject styled = two;
+    styled.insert("style", "elegant");
+    applyAdStyle(QJsonObject{}, base, index, &styled);
+    CHECK(styled.value("beat_sync") == "bars");
+
+    // Kinetic captions reveal across the spoken words.
+    const QList<QList<Word>> chunks = captionChunks({{0, 300'000, "Fresh"}, {300'000, 600'000, "bread"}, {600'000, 900'000, "every"},
+                                                     {900'000, 1'300'000, "morning."}, {1'500'000, 1'800'000, "Order"}});
+    CHECK(chunks.size() == 2 && chunks[0].size() == 4 && chunks[1].first().text == "Order");
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -845,6 +1253,8 @@ int main(int argc, char **argv)
     guardTests();
     styleTests();
     brandTests();
+    smartTests();
+    generationTests();
     anthropicTests();
     openAiTests();
     std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "all ai tests passed", failures, failures == 1 ? "" : "s");
