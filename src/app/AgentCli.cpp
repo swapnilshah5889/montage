@@ -74,6 +74,13 @@ QList<const Segment *> segmentsOn(const Draft &d, TrackRole role, bool texts)
     return out;
 }
 
+// How loud a clip plays while someone talks: music that ducks dips to
+// volume x duck there. "max_volume" checks this level ("quiet under the voice").
+double underSpeech(const Segment &s)
+{
+    return s.duck > 0 ? s.volume * s.duck : s.volume;
+}
+
 bool hasEffect(const Segment &s, const QString &name)
 {
     for (const Effect &e : s.effects)
@@ -164,8 +171,8 @@ QString check(const QJsonObject &c, const Ctx &x)
         const QString name = c.value("media").toString();
         for (const Segment *s : segmentsOn(x.d, TrackRole::Audio, false)) {
             if (mediaName(x.d, *s) != name) continue;
-            if (c.contains("max_volume") && s->volume > c.value("max_volume").toDouble() + 0.001)
-                return QStringLiteral("music volume %1").arg(s->volume);
+            if (c.contains("max_volume") && underSpeech(*s) > c.value("max_volume").toDouble() + 0.001)
+                return QStringLiteral("music volume %1").arg(underSpeech(*s));
             if (c.contains("min_volume") && s->volume < c.value("min_volume").toDouble() - 0.001)
                 return QStringLiteral("music volume %1").arg(s->volume);
             if (c.value("covers_video").toBool() && (s->start > 100'000 || s->end() / 1e6 < x.length - 0.3))
@@ -245,8 +252,8 @@ QString check(const QJsonObject &c, const Ctx &x)
                 ++n;
                 if (c.contains("role") && roleName(t.role) != c.value("role").toString())
                     return QStringLiteral("generated %1 is on the %2 track").arg(kind, roleName(t.role));
-                if (c.contains("max_volume") && s.volume > c.value("max_volume").toDouble() + 0.001)
-                    return QStringLiteral("generated %1 volume %2").arg(kind).arg(s.volume);
+                if (c.contains("max_volume") && underSpeech(s) > c.value("max_volume").toDouble() + 0.001)
+                    return QStringLiteral("generated %1 volume %2").arg(kind).arg(underSpeech(s));
                 if (c.contains("min_volume") && s.volume < c.value("min_volume").toDouble() - 0.001)
                     return QStringLiteral("generated %1 volume %2").arg(kind).arg(s.volume);
                 if (c.value("covers_video").toBool() && (s.start > 100'000 || s.end() / 1e6 < x.length - 0.3))
