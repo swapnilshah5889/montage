@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Montage VERSION 0.1.0 LANGUAGES CXX)
+project(Montage VERSION 0.1.0 LANGUAGES CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,12 +25,17 @@ add_library(montage_engine STATIC
     src/engine/VideoDecoder.h src/engine/VideoDecoder.cpp
     src/engine/AudioDecoder.h src/engine/AudioDecoder.cpp
     src/engine/MediaProbe.h src/engine/MediaProbe.cpp
+    src/engine/Animation.h src/engine/Animation.cpp
+    src/engine/Effects.h src/engine/Effects.mm
+    src/engine/Reframe.h src/engine/Reframe.mm
     src/engine/Renderer.h src/engine/Renderer.cpp
     src/engine/PreviewEngine.h src/engine/PreviewEngine.cpp
     src/engine/ExportJob.h src/engine/ExportJob.cpp
 )
 target_include_directories(montage_engine PUBLIC src ${FFMPEG_INCLUDE_DIR})
-target_link_libraries(montage_engine PUBLIC Qt6::Core Qt6::Gui Qt6::Multimedia ${FFMPEG_LIBRARIES})
+target_link_libraries(montage_engine PUBLIC Qt6::Core Qt6::Gui Qt6::Multimedia ${FFMPEG_LIBRARIES}
+    "-framework CoreImage" "-framework Metal" "-framework Foundation" "-framework CoreGraphics" "-framework Vision" "-framework CoreVideo")
+set_source_files_properties(src/engine/Effects.mm src/engine/Reframe.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 # AI layer: model-agnostic chat providers, edit plans, prompts.
 add_library(montage_ai STATIC
@@ -38,6 +43,8 @@ add_library(montage_ai STATIC
     src/ai/Keychain.h src/ai/Keychain.cpp
     src/ai/EditPlan.h src/ai/EditPlan.cpp
     src/ai/PlanGuards.h src/ai/PlanGuards.cpp
+    src/ai/AdStyles.h src/ai/AdStyles.cpp
+    src/ai/Brand.h src/ai/Brand.cpp
     src/ai/Prompts.h src/ai/Prompts.cpp
 )
 target_link_libraries(montage_ai PUBLIC montage_engine Qt6::Network)
@@ -67,6 +74,7 @@ qt_add_qml_module(Montage
         qml/TimelinePanel.qml
         qml/ChatPanel.qml
         qml/ModelSettings.qml
+        qml/BrandSettings.qml
     SOURCES
         src/app/Agent.h src/app/Agent.cpp
         src/app/Project.h src/app/Project.cpp

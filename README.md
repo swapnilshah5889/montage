@@ -27,6 +27,19 @@ DeepSeek, OpenRouter, or local models through Ollama or LM Studio.
   anything that's off, at most twice.
 - **Edit plans** (`src/ai/EditPlan.*`) describe the whole timeline in seconds with named
   positions; both modes use them. Every request is one undo step.
+- **Ad styles** (`src/ai/AdStyles.*`): the model picks one word (energetic, bold, playful,
+  elegant, luxury, minimal) and the app designs the polish wherever the plan left a choice
+  open: transitions on every cut timed to the style, a colour look, punch-ins and a flash on
+  cuts, Ken Burns on photos, text entrances and exits. Explicit choices win; switching style
+  swaps the whole treatment; things the user removed stay removed.
+- **Brand kit** (`src/ai/Brand.*`, the Brand button in the chat panel): colours, font, logo
+  and house style, applied by the app to everything the assistant makes (or only when a
+  request mentions the brand): brand colours on buttons, badges and lower thirds (with
+  readable text), the brand font, the logo as a corner watermark, text-only videos on the
+  brand colour.
+- **Feature guards**: when a request names an effect, speed change, transition or entrance
+  the plan doesn't contain, the app tells the model exactly what to add (with the cut times);
+  when the target is unambiguous ("the photo", "the whole video") it applies it itself.
 
 ### Measured with a local model
 
@@ -34,9 +47,11 @@ qwen2.5:7b on Ollama (Apple Silicon), guided mode:
 
 | Set | Latest build | Previous build (2 runs) | Time per request |
 | --- | --- | --- | --- |
-| `tests/eval/cases.json` (tuning set) | 16/16 | 15/15, 15/15 | 4-35 s |
+| `tests/eval/cases.json` (tuning set) | 16/16 | 16/16, 15/15 | 4-35 s |
 | `tests/eval/holdout.json` (6 cases) | 6/6 | 6/6, 6/6 | 4-17 s |
 | `tests/eval/holdout2.json` (6 cases) | 6/6 | 6/6, 6/6 | 4-13 s |
+| `tests/eval/ads.json` (ads and effects, tuning set) | 10/10 | 8/10, 4/10 (before the feature guards) | 7-80 s |
+| `tests/eval/ads-holdout.json` (5 cases, never tuned against) | 5/5 | - | 10-70 s |
 
 Both hold-out sets were written before tuning against them, but each was later read to
 debug a failure (a crash, then the logo cases), so neither is fully blind any more. Add a
@@ -69,10 +84,23 @@ server; agent mode hasn't been scored against a live hosted model yet.
 - Split at the playhead (⌘B), delete (⌫), undo/redo (⌘Z / ⇧⌘Z)
 - Live preview with audio, frame stepping (← →), scrubbing on the ruler
 - Inspector: scale, position, opacity, volume; drag the picture or scroll over it on the preview to move or scale it
-- Canvas ratio: Original (follows the first clip), 16:9, 9:16, 1:1, 4:3, 3:4, 21:9
+- Canvas ratio: Original (follows the first clip), 16:9, 9:16, 1:1, 4:5, 4:3, 3:4, 21:9
+- Auto Reframe: main clips fill any shape and follow their subject (faces first, then Vision
+  attention saliency, tracked across the clip and smoothed). Per clip: Auto, Fill, Fit, or Fit
+  with a blurred fill. Logos and other cut-out graphics stay whole.
 - Projects saved as JSON (`.montage`)
-- Text and titles: presets (title, subtitle, caption, lower third, end card), size, colour, outline, box, alignment
-- MP4 export (H.264 + AAC) at canvas resolution
+- Text and titles: presets (title, subtitle, caption, lower third, end card, and for ads
+  headline, badge, price, CTA button, kinetic caption), shapes (pill, burst, tag, ribbon,
+  circle, underline, rounded), shadow, gradient, size, colour, outline, box, alignment
+- Animation: entrance/exit/loop motions (pop, slide, drop, spin, blur, typewriter, kinetic
+  words, Ken Burns, pulse...), keyframes on position, scale, rotation and opacity with easing
+- Effects on Core Image/Metal: 30+ looks and effects (cinematic, vintage, noir, golden hour,
+  neon, glow, grain, VHS, glitch, RGB split, light leak, LUT `.cube` files...) on clips and text
+- Effect moments (adjustment layers): flash, white-out, shake, zoom punch, glitch, blur in/out
+- 19 transitions on main-track cuts (crossfade, whip, zoom, spin, glitch, push, slide, wipe, circle...)
+- Speed: constant speed, freeze frames, speed ramps (ramp up/down, hero, bullet) with time-remapped audio
+- MP4 export (H.264 + AAC) at canvas resolution, or every platform at once (9:16, 4:5, 1:1,
+  16:9), each re-laid-out and reframed
 
 ## Build
 
@@ -101,7 +129,10 @@ build/Montage.app/Contents/MacOS/Montage --import a.mp4 --import b.mov --import 
 ```
 
 `--open <project>`, `--seek <seconds>`, `--play`, `--select-first`, `--text <preset>:<text>` and
-`--screenshot <png>` (render the window to a PNG, then quit) are also available.
+`--screenshot <png>` (render the window to a PNG, then quit) are also available. `--plan <json>`
+applies an edit plan, `--frame <seconds> --frame-out <png>` renders one frame, and
+`--formats 9:16,1:1,16:9` with `--export` writes one file per shape. `MONTAGE_BRAND_JSON`
+overrides the saved brand kit for a scripted run.
 
 Talk to the assistant without the UI (`--profile` picks the model):
 
@@ -145,16 +176,20 @@ build/plan_test
 | `src/ai/ChatProvider.*` | Model-agnostic chat: OpenAI-compatible and Anthropic adapters | - |
 | `src/ai/EditPlan.*` | Timeline ⇄ JSON edit plan, validation, repairs | - |
 | `src/ai/EditorTools.*`, `Prompts.*` | Agent tools and system prompts | `Agent` / `SmartAssistant` QML modules |
+| `src/ai/PlanGuards.*`, `AdStyles.*`, `Brand.*` | Deterministic guards, ad style designer, brand kit | - |
+| `src/engine/Animation.*`, `Effects.mm`, `Reframe.mm` | Motions and keyframes, Core Image effects, Auto Reframe (Vision) | VE effect / animation modules |
 | `src/app/Agent.*` | Agent loop, guided planner, chat transcript, model profiles | - |
 | `qml/` | UI: chat, media, player, inspector, timeline | `TimeLine`, `Player`, `MaterialPanel`, `FunctionPanel` QML modules |
 
 ## Known gaps and next steps
 
-- Compositing runs on the CPU (QPainter). Moving it to Qt RHI shaders would put it
-  on the GPU (Metal) the way CapCut's AGFX layer does, and enable effects and transitions.
+- Compositing runs on the CPU (QPainter); effects run on the GPU through Core Image. Moving
+  compositing to Qt RHI shaders would put all of it on Metal the way CapCut's AGFX layer does.
 - Decoding is software (multithreaded). FFmpeg's VideoToolbox hwaccel would cut CPU use for 4K.
 - HDR (HLG/PQ) sources are shown without tone mapping.
-- Not built yet: transitions, speed changes, keyframes, audio waveforms, proxies.
+- Not built yet: audio waveforms, proxies, generative media (ComfyUI images/video, Kokoro
+  voiceover, ACE-Step music), beat detection for cutting to music.
+- Auto Reframe analyses a clip the first time it is drawn (a fraction of a second per clip).
 - Assistant: no speech transcription yet (captions from speech, cutting by what's said);
   guided mode sees media only through names and lengths unless the model can read images.
 - Shipping: build an LGPL-only FFmpeg and link it dynamically, run `macdeployqt`, then sign and notarize.

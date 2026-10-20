@@ -36,4 +36,28 @@ QString parseColor(const QString &text);
 // Returns false if nothing needed changing.
 bool fitToLength(double seconds, const Draft &d, const MediaIndex &index, QJsonObject *plan);
 
+// A new ad (the plan sets a style and there was none) with no music gets the
+// first audio file under it, unless the request says otherwise. Returns true
+// if music was added.
+bool addAdMusic(const QString &request, const QJsonObject &current, const Draft &d, const MediaIndex &index,
+                QJsonObject *plan);
+
+// Applies what the request asks for when its target is unambiguous and the
+// model left it out: a slow zoom on "the photo(s)", a look on "the whole
+// video". Returns a note per change.
+QStringList applyObviousFeatures(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan);
+
+// Shapes to export when the request asks for several platforms at once
+// ("export it for TikTok and YouTube", "all formats"); empty otherwise.
+QStringList requestedFormats(const QString &request);
+
+// New texts meant for the end ("add a Shop now button at the end") that stop
+// short of it are moved to end with the video. Returns true if any moved.
+bool snapEndTexts(const QString &request, const QJsonObject &current, QJsonObject *plan);
+
+// Effects and speed changes the request names that the plan doesn't contain
+// ("add a flash", "slow motion", "black and white"), each as an instruction
+// the model can follow, with exact JSON and the cut times.
+QStringList missingFeatures(const QString &request, const QJsonObject &plan);
+
 }  // namespace mtg::ai

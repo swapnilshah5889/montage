@@ -1,0 +1,410 @@
+{
+  "about": "Ad and effects eval (tuning set). Media ids follow each case's media list. Run: Montage --eval tests/eval/ads.json --media tests/media --profile <id>",
+  "cases": [
+    {
+      "name": "energetic-sneaker-ad",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4",
+        "song.mp3"
+      ],
+      "requests": [
+        "Make a 15 second energetic Instagram ad for my sneaker brand Stride. Say 30% OFF and end with a Shop now button"
+      ],
+      "checks": [
+        {
+          "type": "length",
+          "min": 14.5,
+          "max": 15.5
+        },
+        {
+          "type": "aspect",
+          "value": "9:16"
+        },
+        {
+          "type": "style",
+          "value": "energetic"
+        },
+        {
+          "type": "transitions",
+          "min": 2
+        },
+        {
+          "type": "text",
+          "contains": "30% OFF"
+        },
+        {
+          "type": "text",
+          "contains": "Shop now",
+          "start_min": 10
+        },
+        {
+          "type": "audio",
+          "media": "song.mp3",
+          "covers_video": true
+        }
+      ]
+    },
+    {
+      "name": "luxury-restyle",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m3",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Make it feel luxurious and premium"
+      ],
+      "checks": [
+        {
+          "type": "style",
+          "value": "luxury"
+        },
+        {
+          "type": "transitions",
+          "min": 2
+        },
+        {
+          "type": "main_effect",
+          "name": "cinematic",
+          "min": 2
+        },
+        {
+          "type": "main_count",
+          "min": 3,
+          "max": 3
+        }
+      ]
+    },
+    {
+      "name": "slow-motion-first",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Make the first clip slow motion"
+      ],
+      "checks": [
+        {
+          "type": "speed",
+          "media": "beach.mp4",
+          "slow": true
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        },
+        {
+          "type": "first_main",
+          "media": "beach.mp4"
+        }
+      ]
+    },
+    {
+      "name": "flash-at-cut",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Add a flash when the second clip starts"
+      ],
+      "checks": [
+        {
+          "type": "moment",
+          "effect": "flash",
+          "at_min": 4.5,
+          "at_max": 5.5
+        },
+        {
+          "type": "length",
+          "min": 9.9,
+          "max": 10.1
+        }
+      ]
+    },
+    {
+      "name": "glitch-title",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ],
+        "texts": [
+          {
+            "text": "DROP",
+            "at": 0,
+            "duration": 3,
+            "style": "headline"
+          }
+        ]
+      },
+      "requests": [
+        "Add a glitch effect to the title"
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "DROP",
+          "effect": "glitch"
+        },
+        {
+          "type": "length",
+          "min": 9.9,
+          "max": 10.1
+        }
+      ]
+    },
+    {
+      "name": "shop-now-end",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Add a Shop now button at the end"
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "Shop now",
+          "shape": "pill",
+          "ends_with_video": true
+        },
+        {
+          "type": "length",
+          "min": 9.9,
+          "max": 10.1
+        }
+      ]
+    },
+    {
+      "name": "hard-cuts",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4"
+      ],
+      "setup": {
+        "style": "energetic",
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 4
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4,
+            "transition": "whip"
+          },
+          {
+            "media": "m3",
+            "from": 0,
+            "to": 4,
+            "transition": "zoom"
+          }
+        ]
+      },
+      "requests": [
+        "Remove all the transitions, I want hard cuts"
+      ],
+      "checks": [
+        {
+          "type": "transitions",
+          "max": 0
+        },
+        {
+          "type": "main_count",
+          "min": 3,
+          "max": 3
+        }
+      ]
+    },
+    {
+      "name": "black-white-all",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Make the whole video black and white"
+      ],
+      "checks": [
+        {
+          "type": "main_effect",
+          "name": "black-white",
+          "all": true
+        },
+        {
+          "type": "length",
+          "min": 9.9,
+          "max": 10.1
+        }
+      ]
+    },
+    {
+      "name": "ken-burns-photo",
+      "media": [
+        "photo.png",
+        "beach.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 3
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Slowly zoom into the photo"
+      ],
+      "checks": [
+        {
+          "type": "motion",
+          "media": "photo.png"
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        }
+      ]
+    },
+    {
+      "name": "price-badge",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 6
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4
+          }
+        ]
+      },
+      "requests": [
+        "Show the price $49 in the top right from 3 seconds"
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "$49",
+          "start_min": 2.5,
+          "start_max": 3.5
+        },
+        {
+          "type": "length",
+          "min": 9.9,
+          "max": 10.1
+        }
+      ]
+    }
+  ]
+}

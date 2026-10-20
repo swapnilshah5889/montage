@@ -72,6 +72,13 @@ QList<const Segment *> segmentsOn(const Draft &d, TrackRole role, bool texts)
     return out;
 }
 
+bool hasEffect(const Segment &s, const QString &name)
+{
+    for (const Effect &e : s.effects)
+        if (e.name == name) return true;
+    return false;
+}
+
 // Returns an empty string when the check passes, otherwise why it failed.
 QString check(const QJsonObject &c, const Ctx &x)
 {
@@ -135,6 +142,14 @@ QString check(const QJsonObject &c, const Ctx &x)
                 return QStringLiteral("text starts at %1s").arg(s->start / 1e6);
             if (c.value("ends_with_video").toBool() && std::abs(s->end() / 1e6 - x.length) > 0.35)
                 return QStringLiteral("text ends at %1s, video at %2s").arg(s->end() / 1e6).arg(x.length);
+            if (c.contains("start_min") && s->start / 1e6 < c.value("start_min").toDouble() - eps)
+                return QStringLiteral("text starts at %1s").arg(s->start / 1e6);
+            if (c.contains("shape") && s->text.shape != c.value("shape").toString())
+                return QStringLiteral("text box is \"%1\"").arg(s->text.shape);
+            if (c.contains("effect") && !hasEffect(*s, c.value("effect").toString()))
+                return QStringLiteral("text has no %1 effect").arg(c.value("effect").toString());
+            if (c.value("animated").toBool() && s->motion.in.isEmpty() && s->motion.out.isEmpty() && s->keys.isEmpty())
+                return QStringLiteral("text \"%1\" doesn't move").arg(want);
             return {};
         }
         return QStringLiteral("no text containing \"%1\"").arg(want);
@@ -172,6 +187,59 @@ QString check(const QJsonObject &c, const Ctx &x)
             return {};
         }
         return QStringLiteral("no overlay uses %1").arg(name);
+    }
+    if (type == QLatin1String("style")) {
+        const QString want = c.value("value").toString();
+        const bool ok = want.isEmpty() ? !x.d.style.isEmpty() : (c.contains("any_of") ? false : x.d.style == want);
+        bool anyOf = false;
+        for (const QJsonValue &v : c.value("any_of").toArray()) anyOf |= x.d.style == v.toString();
+        return ok || anyOf ? QString() : QStringLiteral("style is \"%1\"").arg(x.d.style);
+    }
+    if (type == QLatin1String("transitions")) {
+        int n = 0;
+        for (const Segment &s : x.d.tracks[0].segments)
+            n += !s.transition.name.isEmpty() && (!c.contains("name") || s.transition.name == c.value("name").toString());
+        return n >= c.value("min").toInt(0) && n <= c.value("max").toInt(1000) ? QString() : QStringLiteral("%1 transitions").arg(n);
+    }
+    if (type == QLatin1String("main_effect")) {  // clips on the main track with this effect (or any effect)
+        const QString name = c.value("name").toString();
+        int n = 0;
+        for (const Segment &s : x.d.tracks[0].segments) n += name.isEmpty() ? !s.effects.isEmpty() : hasEffect(s, name);
+        const int all = int(x.d.tracks[0].segments.size());
+        const int lo = c.value("all").toBool() ? all : c.value("min").toInt(1);
+        return n >= lo ? QString() : QStringLiteral("%1 of %2 clips have %3").arg(n).arg(all).arg(name.isEmpty() ? "an effect" : name);
+    }
+    if (type == QLatin1String("moment")) {  // an adjustment layer with this effect
+        const QString name = c.value("effect").toString();
+        QStringList seen;
+        for (const Track &t : x.d.tracks)
+            for (const Segment &s : t.segments) {
+                if (s.materialId != kEffectMaterialId) continue;
+                for (const Effect &e : s.effects) seen << QStringLiteral("%1@%2").arg(e.name).arg(s.start / 1e6);
+                if (!hasEffect(s, name)) continue;
+                const double at = s.start / 1e6;
+                if (c.contains("at_min") && at < c.value("at_min").toDouble() - eps) continue;
+                if (c.contains("at_max") && at > c.value("at_max").toDouble() + eps) continue;
+                return {};
+            }
+        return QStringLiteral("no %1 moment (have %2)").arg(name, seen.isEmpty() ? "none" : seen.join(", "));
+    }
+    if (type == QLatin1String("speed")) {  // a main clip of this media is slowed or sped up
+        const QString name = c.value("media").toString();
+        for (const Segment &s : x.d.tracks[0].segments) {
+            if (!name.isEmpty() && mediaName(x.d, s) != name) continue;
+            if (c.value("slow").toBool() && ((s.speed > 0 && s.speed < 0.95) || !s.curve.isEmpty())) return {};
+            if (c.value("fast").toBool() && s.speed > 1.05) return {};
+        }
+        return QStringLiteral("no %1 clip%2").arg(c.value("slow").toBool() ? "slowed" : "sped-up", name.isEmpty() ? "" : " of " + name);
+    }
+    if (type == QLatin1String("motion")) {  // a clip of this media moves (any motion or keyframes)
+        const QString name = c.value("media").toString();
+        for (const Track &t : x.d.tracks)
+            for (const Segment &s : t.segments)
+                if (mediaName(x.d, s) == name && (!s.motion.in.isEmpty() || !s.motion.out.isEmpty() || !s.motion.loop.isEmpty() || !s.keys.isEmpty()))
+                    return {};
+        return name + QStringLiteral(" doesn't move");
     }
     return QStringLiteral("unknown check type ") + type;
 }

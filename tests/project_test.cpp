@@ -140,6 +140,34 @@ int main(int argc, char **argv)
         CHECK(q.canvasWidth() == 1920 && q.canvasHeight() == 1080);  // 720p video, scaled to 1080 on the short side
     }
 
+    // Speed: faster is shorter and plays the same footage; freeze frames go in at the playhead.
+    {
+        Project q(&app);
+        q.importFiles({QUrl::fromLocalFile(media.filePath("clipA.mp4"))});
+        const QString seg = q.addToTimeline(materialId(q, "clipA.mp4"));
+        q.setSpeed(seg, 2.0);
+        CHECK(q.draft().segment(seg)->duration == 2'000'000 && q.draft().segment(seg)->sourceSpan() == 4'000'000);
+        q.setSpeed(seg, 0.5, "hero");
+        CHECK(q.draft().segment(seg)->duration == 8'000'000 && q.draft().segment(seg)->curve == "hero");
+        q.setSpeed(seg, 1.0);
+        CHECK(q.freezeFrame(1'000'000, 1.5));
+        const QList<Segment> &mainSegs = q.draft().tracks[0].segments;
+        CHECK(mainSegs.size() == 3 && mainSegs[1].speed == 0 && mainSegs[1].duration == 1'500'000);
+        CHECK(mainSegs[1].sourceStart == 1'000'000 && mainSegs[2].sourceStart == 1'000'000 && q.duration() == 5'500'000);
+
+        // Splitting a keyframed clip keeps each half's animation.
+        Project k(&app);
+        k.importFiles({QUrl::fromLocalFile(media.filePath("clipA.mp4"))});
+        const QString ks = k.addToTimeline(materialId(k, "clipA.mp4"));
+        k.addKeyframe(ks, 0);
+        k.setSegmentProperty(ks, "scale", 2.0, true, 4'000'000);  // keyframed scale 1 -> 2
+        k.setSelectedId(ks);
+        CHECK(k.splitAt(2'000'000));
+        const Segment &l = k.draft().tracks[0].segments[0], &r = k.draft().tracks[0].segments[1];
+        CHECK(std::abs(l.keys.value("scale").last().v - 1.5) < 0.01 && std::abs(r.keys.value("scale").first().v - 1.5) < 0.01);
+        CHECK(r.keys.value("scale").last().t == 2'000'000 && std::abs(r.keys.value("scale").last().v - 2.0) < 1e-9);
+    }
+
     // Fixed aspect ratio
     p.setAspect("9:16");
     CHECK(p.canvasWidth() == 1080 && p.canvasHeight() == 1920 && p.aspect() == "9:16");

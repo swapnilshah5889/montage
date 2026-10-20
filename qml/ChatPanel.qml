@@ -7,6 +7,7 @@ import Montage
 Rectangle {
     id: panel
     signal settingsRequested
+    signal brandRequested
     signal importRequested
 
     color: Theme.panel
@@ -45,6 +46,12 @@ Rectangle {
                 onActivated: Agent.profileId = currentValue
                 ToolTip.visible: hovered
                 ToolTip.text: Agent.profile.model + (Agent.profile.guided ? " · guided mode" : " · agent mode")
+            }
+            FlatButton {
+                text: "Brand"
+                tip: Agent.brand.enabled ? "Brand kit (on)" : "Brand kit: colours, font, logo"
+                accent: !!Agent.brand.enabled
+                onClicked: panel.brandRequested()
             }
             FlatButton { text: "⚙"; tip: "Models and API keys"; font.pixelSize: 16; onClicked: panel.settingsRequested() }
             FlatButton { text: "New"; tip: "Start a new conversation"; enabled: list.count > 0; onClicked: Agent.newChat() }

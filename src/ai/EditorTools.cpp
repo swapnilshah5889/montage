@@ -1,5 +1,7 @@
 #include "EditorTools.h"
 
+#include "AdStyles.h"
+#include "Brand.h"
 #include "EditPlan.h"
 #include "app/Exporter.h"
 #include "app/Project.h"
@@ -152,8 +154,13 @@ QList<ToolSpec> EditorTools::specs(bool vision) const
     out << ToolSpec{
         "export_video",
         "Renders the timeline to an MP4 in the user's Movies/Montage folder and returns the file path. Only call this "
-        "when the user asks to export, render, save or download the video.",
-        schema({{"name", QJsonObject{{"type", "string"}, {"description", "File name without extension"}}}})};
+        "when the user asks to export, render, save or download the video. For several platforms at once (\"for TikTok "
+        "and YouTube\", \"all formats\") pass formats: each is a separate file laid out for that shape, with clips "
+        "reframed around their subject and text re-placed.",
+        schema({{"name", QJsonObject{{"type", "string"}, {"description", "File name without extension"}}},
+                {"formats", QJsonObject{{"type", "array"},
+                                        {"items", QJsonObject{{"type", "string"}, {"enum", QJsonArray::fromStringList(exportFormatNames())}}},
+                                        {"description", "Shapes to export, e.g. [\"9:16\", \"1:1\", \"16:9\"]. Omit for the current shape only."}}}})};
     return out;
 }
 
@@ -185,7 +192,9 @@ void EditorTools::run(const ToolCall &call, bool vision, const std::function<voi
             done(r);
             return;
         }
-        exportVideo(m_project->name(), [r, done](bool ok, const QString &msg) mutable {
+        QStringList formats;
+        for (const QJsonValue &v : call.input.value("plan").toObject().value("export_formats").toArray()) formats << v.toString();
+        exportVideo(m_project->name(), formats, [r, done](bool ok, const QString &msg) mutable {
             r.text += QStringLiteral("\n\n") + (ok ? QStringLiteral("Exported to ") + msg : QStringLiteral("Export failed: ") + msg);
             done(r);
         });
@@ -199,7 +208,9 @@ void EditorTools::run(const ToolCall &call, bool vision, const std::function<voi
         done(importMedia(call));
     } else if (n == QLatin1String("export_video")) {
         const QString name = call.input.value("name").toString(m_project->name());
-        exportVideo(name, [call, done](bool ok, const QString &msg) {
+        QStringList formats;
+        for (const QJsonValue &v : call.input.value("formats").toArray()) formats << v.toString();
+        exportVideo(name, formats, [call, done](bool ok, const QString &msg) {
             done(ToolResult{call.id, call.name, ok ? QStringLiteral("Exported to ") + msg : msg, {}, !ok});
         });
     } else {
@@ -217,9 +228,13 @@ ToolResult EditorTools::applyPlan(const ToolCall &call)
 
     const Draft &current = m_project->draft();
     const MediaIndex index(current);
+    const QJsonObject before = planFromDraft(current, index);
+    QStringList styled = applyBrand(m_request, loadBrandKit(), before, current, index, &plan);
+    styled += applyAdStyle(before, current, index, &plan);
     PlanReport report;
     const Draft next = draftFromPlan(current, plan, index, &report);
     if (!report.ok()) return error(call, report.text());
+    report.warnings = styled + report.warnings;
     m_project->applyDraft(next);
     const Draft &now = m_project->draft();
     QString text = report.warnings.isEmpty() ? QStringLiteral("Applied.") : report.text();
@@ -351,7 +366,7 @@ QList<QByteArray> EditorTools::mediaSheets(int maxFiles) const
     return out;
 }
 
-void EditorTools::exportVideo(const QString &name, const std::function<void(bool, QString)> &done)
+void EditorTools::exportVideo(const QString &name, const QStringList &formats, const std::function<void(bool, QString)> &done)
 {
     if (m_project->duration() <= 0) {
         done(false, QStringLiteral("The timeline is empty."));
@@ -361,21 +376,30 @@ void EditorTools::exportVideo(const QString &name, const std::function<void(bool
         done(false, QStringLiteral("Another export is already running."));
         return;
     }
+    QStringList shapes;
+    for (const QString &f : formats)
+        if (exportFormatNames().contains(f) && !shapes.contains(f)) shapes << f;
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation) + QStringLiteral("/Montage");
     QDir().mkpath(dir);
     QString base = name;
     base.replace(QRegularExpression(QStringLiteral(R"([/\\:*?"<>|]+)")), QStringLiteral("-"));
     if (base.trimmed().isEmpty()) base = QStringLiteral("Montage");
     QString path = dir + QLatin1Char('/') + base + QStringLiteral(".mp4");
-    for (int i = 2; QFileInfo::exists(path); ++i) path = QStringLiteral("%1/%2 (%3).mp4").arg(dir, base).arg(i);
+    auto taken = [&](const QString &p) {
+        for (const QString &out : Exporter::outputPaths(p, shapes))
+            if (QFileInfo::exists(out)) return true;
+        return false;
+    };
+    for (int i = 2; taken(path); ++i) path = QStringLiteral("%1/%2 (%3).mp4").arg(dir, base).arg(i);
 
     auto *conn = new QMetaObject::Connection;
-    *conn = connect(m_exporter, &Exporter::finished, this, [conn, done, path](bool ok, const QString &message, const QUrl &) {
-        QObject::disconnect(*conn);
-        delete conn;
-        done(ok, ok ? path : message);
-    });
-    m_exporter->start(QUrl::fromLocalFile(path));
+    *conn = connect(m_exporter, &Exporter::finished, this,
+                    [conn, done](bool ok, const QString &message, const QUrl &, const QStringList &files) {
+                        QObject::disconnect(*conn);
+                        delete conn;
+                        done(ok, ok ? files.join('\n') : message);
+                    });
+    m_exporter->start(QUrl::fromLocalFile(path), shapes);
 }
 
 }  // namespace mtg::ai

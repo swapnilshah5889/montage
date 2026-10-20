@@ -7,7 +7,7 @@
 //
 // {
 //   "reply":  "short message for the user",
-//   "aspect": "keep" | "original" | "16:9" | "9:16" | "1:1" | "4:3" | "3:4" | "21:9",
+//   "aspect": "keep" | "original" | "16:9" | "9:16" | "1:1" | "4:5" | "4:3" | "3:4" | "21:9",
 //   "main":     [{"media": "m1", "from": 0, "to": 4.5, "volume": 1}],
 //   "overlays": [{"media": "m2", "at": 1, "from": 0, "to": 3, "position": "top-right", "scale": 0.4}],
 //   "audio":    [{"media": "m3", "at": 0, "from": 0, "to": 12, "volume": 0.3}],
@@ -56,6 +56,13 @@ QJsonObject planFromDraft(const Draft &d, const MediaIndex &index);
 // settings are kept). Lenient about number formats; strict about media ids
 // and ranges.
 Draft draftFromPlan(const Draft &current, const QJsonObject &plan, const MediaIndex &index, PlanReport *report);
+
+// The same edit in another shape ("9:16", "1:1", "4:5", "16:9"...): texts and
+// overlays re-anchor to their named positions, clips reframe (auto framing).
+Draft resizedDraft(const Draft &d, const QString &aspect);
+
+// Shapes a video can be exported in at once.
+QStringList exportFormatNames();  // 9:16, 4:5, 1:1, 16:9
 
 // JSON Schema for plans; portable across Anthropic, OpenAI and Ollama.
 QJsonObject planSchema();

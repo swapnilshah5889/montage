@@ -57,6 +57,7 @@ class Agent : public QObject
     Q_PROPERTY(QVariantList profiles READ profiles NOTIFY profilesChanged)
     Q_PROPERTY(QString profileId READ profileId WRITE setProfileId NOTIFY profileChanged)
     Q_PROPERTY(QVariantMap profile READ profileMap NOTIFY profileChanged)
+    Q_PROPERTY(QVariantMap brand READ brand WRITE setBrand NOTIFY brandChanged)
 
 public:
     Agent(Project *project, Exporter *exporter, QObject *parent);
@@ -71,6 +72,9 @@ public:
     QString profileId() const { return m_profile.id; }
     void setProfileId(const QString &id);
     QVariantMap profileMap() const;
+    QVariantMap brand() const;
+    void setBrand(const QVariantMap &brand);
+    Q_INVOKABLE QStringList adStyles() const;
 
     Q_INVOKABLE void send(const QString &text);
     Q_INVOKABLE void stop();
@@ -89,6 +93,7 @@ signals:
     void statusChanged();
     void profilesChanged();
     void profileChanged();
+    void brandChanged();
     void modelsFetched(const QString &id, const QStringList &models, const QString &error);
     void finished(bool ok, const QString &reply);
 
