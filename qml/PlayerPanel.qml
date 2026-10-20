@@ -149,7 +149,7 @@ Rectangle {
                     id: ratio
                     focusPolicy: Qt.NoFocus
                     implicitWidth: 110
-                    model: ["Original", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]
+                    model: ["Original", "16:9", "9:16", "1:1", "4:5", "4:3", "3:4", "21:9"]
                     currentIndex: Math.max(0, model.indexOf(Project.aspect))
                     onActivated: Project.setAspect(currentText)
                 }

@@ -93,6 +93,24 @@ Rectangle {
                 FlatButton { text: "Split"; tip: "Split at playhead (⌘B)"; enabled: Project.duration > 0; onClicked: Project.splitAt(Player.position) }
                 FlatButton { text: "Delete"; tip: "Delete selected clip (⌫)"; enabled: Project.selectedId !== ""; onClicked: Project.deleteSelected() }
                 FlatButton { text: "+ Text"; tip: "Add a title at the playhead"; onClicked: Project.addText("Your text", Player.position, 0, "title") }
+                FlatButton {
+                    text: "+ Effect"
+                    tip: "Add an effect moment or look at the playhead; it affects everything beneath it"
+                    onClicked: effectMenu.popup()
+                    Menu {
+                        id: effectMenu
+                        MenuSeparator { contentItem: Label { text: "Moments"; color: Theme.textDim; font.pixelSize: 11; leftPadding: 8 } }
+                        Repeater {
+                            model: Project.momentNames()
+                            MenuItem { required property string modelData; text: modelData; onTriggered: Project.addEffectLayer(modelData, Player.position) }
+                        }
+                        MenuSeparator { contentItem: Label { text: "Looks"; color: Theme.textDim; font.pixelSize: 11; leftPadding: 8 } }
+                        Repeater {
+                            model: Project.effectNames()
+                            MenuItem { required property string modelData; text: modelData; onTriggered: Project.addEffectLayer(modelData, Player.position) }
+                        }
+                    }
+                }
                 Item { Layout.fillWidth: true }
                 Label { text: "Zoom"; color: Theme.textDim; font.pixelSize: 12 }
                 Slider {

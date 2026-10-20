@@ -1,5 +1,7 @@
 #include "Project.h"
 
+#include "engine/Animation.h"
+#include "engine/Effects.h"
 #include "engine/MediaProbe.h"
 
 #include <QDir>
@@ -24,7 +26,7 @@ struct AspectPreset {
 };
 constexpr AspectPreset kAspects[] = {
     {"16:9", 1920, 1080}, {"9:16", 1080, 1920}, {"1:1", 1080, 1080},
-    {"4:3", 1440, 1080},  {"3:4", 1080, 1440},  {"21:9", 2560, 1080},
+    {"4:3", 1440, 1080},  {"3:4", 1080, 1440},  {"21:9", 2560, 1080}, {"4:5", 1080, 1350},
 };
 
 void insertOnMain(Draft &d, Segment seg, qint64 at)
@@ -57,6 +59,33 @@ QVariantMap segmentMap(const Draft &d, const Segment &s)
         {"x", s.transform.x},
         {"y", s.transform.y},
         {"scale", s.transform.scale},
+        {"rotation", s.transform.rotation},
+        {"motionIn", s.motion.in},
+        {"motionInSec", s.motion.inUs / 1e6},
+        {"motionOut", s.motion.out},
+        {"motionOutSec", s.motion.outUs / 1e6},
+        {"motionLoop", s.motion.loop},
+        {"speed", s.speed},
+        {"curve", s.curve},
+        {"framing", s.framing},
+        {"transition", s.transition.name},
+        {"transitionSec", s.transition.us / 1e6},
+        {"effects", [&] {
+             QVariantList fx;
+             for (const Effect &e : s.effects) fx << QVariantMap{{"name", e.name}, {"amount", e.amount}};
+             return fx;
+         }()},
+        {"keyframes", [&] {
+             QVariantList times;  // clip-relative seconds, for timeline markers
+             QSet<qint64> seen;
+             for (const auto &track : s.keys)
+                 for (const KeyPoint &k : track)
+                     if (!seen.contains(k.t)) {
+                         seen.insert(k.t);
+                         times << k.t / 1e6;
+                     }
+             return times;
+         }()},
     };
     if (isText) {
         map.insert("text", s.text.text);
@@ -68,6 +97,9 @@ QVariantMap segmentMap(const Draft &d, const Segment &s)
         map.insert("outlineColor", s.text.outlineColor);
         map.insert("background", s.text.background);
         map.insert("align", s.text.align);
+        map.insert("shape", s.text.shape.isEmpty() ? QStringLiteral("rounded") : s.text.shape);
+        map.insert("shadow", s.text.shadow);
+        map.insert("gradient", s.text.gradient);
     }
     return map;
 }
@@ -172,7 +204,7 @@ QVariantList Project::materials() const
 
     QVariantList out;
     for (const Material &m : m_draft.materials) {
-        if (m.kind == MaterialKind::Text) continue;
+        if (m.kind == MaterialKind::Text || m.kind == MaterialKind::Effect) continue;
         out.append(QVariantMap{
             {"id", m.id},
             {"kind", kindName(m.kind)},
@@ -222,6 +254,8 @@ QVariantMap Project::selection() const
     if (!s) return {};
     QVariantMap map = segmentMap(m_draft, *s);
     map.insert("role", roleName(owner->role));
+    map.insert("canTransition", owner->role == TrackRole::Main && !owner->segments.isEmpty() && owner->segments.first().id != s->id);
+    map.insert("onMain", owner->role == TrackRole::Main);
     return map;
 }
 
@@ -340,7 +374,7 @@ void Project::moveSegment(const QString &segmentId, const QString &trackId, qint
             if (target && target->role != TrackRole::Audio) target = nullptr;
         } else if (target) {
             if (target->role == TrackRole::Audio) return false;  // pictures don't go on audio tracks
-            if (m->kind == MaterialKind::Text && target->role == TrackRole::Main) return false;
+            if ((m->kind == MaterialKind::Text || m->kind == MaterialKind::Effect) && target->role == TrackRole::Main) return false;
             role = target->role;
         } else if (trackId == QLatin1String("new-overlay")) {
             role = TrackRole::Overlay;
@@ -368,21 +402,25 @@ void Project::trimSegment(const QString &segmentId, qint64 newStart, qint64 newD
         const bool main = owner->role == TrackRole::Main;
         const qint64 oldStart = s->start;
         const qint64 oldEnd = s->end();
+        // Timeline time maps to source time at the clip's speed; freezes don't use up source.
+        const bool timed = m->isTimed() && s->speed > 0;
+        const double speed = timed ? s->speed : 1.0;
 
         if (newStart != oldStart) {
             // Left edge: the end stays put, the source in-point moves.
-            qint64 minStart = m->isTimed() ? oldStart - s->sourceStart : -kFar;
+            qint64 minStart = timed ? oldStart - qint64(double(s->sourceStart) / speed) : -kFar;
             if (!main) {
                 minStart = std::max<qint64>(minStart, 0);
                 for (const Segment &o : owner->segments)
                     if (o.id != s->id && o.end() <= oldStart) minStart = std::max(minStart, o.end());
             }
             const qint64 start = std::clamp(newStart, minStart, oldEnd - kMinSegmentUs);
-            s->sourceStart = m->isTimed() ? s->sourceStart + (start - oldStart) : 0;
+            if (timed) s->sourceStart = std::max<qint64>(0, s->sourceStart + qint64(double(start - oldStart) * speed));
+            else if (!m->isTimed()) s->sourceStart = 0;
             s->start = start;
             s->duration = oldEnd - start;
         } else {
-            qint64 maxEnd = m->isTimed() ? oldStart + (m->durationUs - s->sourceStart) : kFar;
+            qint64 maxEnd = timed ? oldStart + qint64(double(m->durationUs - s->sourceStart) / speed) : kFar;
             if (!main)
                 for (const Segment &o : owner->segments)
                     if (o.id != s->id && o.start >= oldEnd) maxEnd = std::min(maxEnd, o.start);
@@ -413,11 +451,37 @@ bool Project::splitAt(qint64 t)
         if (!left) return false;
         const Material *m = d.material(left->materialId);
         Segment right = *left;
+        const qint64 local = t - left->start;
         right.id = rightId;
         right.start = t;
         right.duration = left->end() - t;
-        right.sourceStart = (m && m->isTimed()) ? left->sourceStart + (t - left->start) : 0;
-        left->duration = t - left->start;
+        right.sourceStart = (m && m->isTimed()) ? left->sourceAt(local) : 0;
+        right.transition = Transition{};  // the cut inside a clip starts plain
+        // Entrance stays on the first half, exit on the second.
+        right.motion.in.clear();
+        left->motion.out.clear();
+        // Keyframes: each half keeps its side, with the value at the cut pinned.
+        if (!left->keys.isEmpty()) {
+            Segment still = *left;
+            still.motion = Motion{};
+            const FrameState at = animate(still, local);
+            const QHash<QString, double> cutValue{{"x", at.x}, {"y", at.y}, {"scale", at.scale}, {"rotation", at.rotation}, {"opacity", at.opacity}};
+            for (auto it = left->keys.begin(); it != left->keys.end(); ++it) {
+                QList<KeyPoint> before, after;
+                for (const KeyPoint &k : it.value()) {
+                    if (k.t <= local) before << k;
+                    if (k.t >= local) after << KeyPoint{k.t - local, k.v, k.ease};
+                }
+                if (before.isEmpty() || before.last().t != local) before << KeyPoint{local, cutValue.value(it.key()), QStringLiteral("linear")};
+                if (after.isEmpty() || after.first().t != 0) after.prepend(KeyPoint{0, cutValue.value(it.key()), QStringLiteral("linear")});
+                it.value() = before;
+                right.keys[it.key()] = after;
+            }
+        }
+        // A speed ramp can't be cut in two; both halves keep the average speed.
+        left->curve.clear();
+        right.curve.clear();
+        left->duration = local;
         for (qsizetype i = 0; i < owner->segments.size(); ++i) {
             if (owner->segments[i].id == targetId) {
                 owner->segments.insert(i + 1, right);
@@ -447,6 +511,7 @@ static void applyProperty(Segment &s, const QString &key, double v)
     else if (key == QLatin1String("x")) s.transform.x = std::clamp(v, -2.0, 2.0);
     else if (key == QLatin1String("y")) s.transform.y = std::clamp(v, -2.0, 2.0);
     else if (key == QLatin1String("scale")) s.transform.scale = std::clamp(v, 0.05, 8.0);
+    else if (key == QLatin1String("rotation")) s.transform.rotation = std::clamp(v, -720.0, 720.0);
 }
 
 template <typename F>
@@ -471,9 +536,32 @@ void Project::liveOrCommit(const QString &segmentId, bool commit, F &&apply)
     });
 }
 
-void Project::setSegmentProperty(const QString &segmentId, const QString &key, double value, bool commit)
+void Project::setSegmentProperty(const QString &segmentId, const QString &key, double value, bool commit, qint64 at)
 {
-    liveOrCommit(segmentId, commit, [&](Segment &s) { applyProperty(s, key, value); });
+    liveOrCommit(segmentId, commit, [&](Segment &s) {
+        auto track = s.keys.find(key);
+        if (at < 0 || track == s.keys.end() || track->isEmpty()) {
+            applyProperty(s, key, value);
+            return;
+        }
+        Segment probe;  // clamp the value the same way the resting property is clamped
+        applyProperty(probe, key, value);
+        const double v = key == QLatin1String("x") ? probe.transform.x
+                         : key == QLatin1String("y") ? probe.transform.y
+                         : key == QLatin1String("scale") ? probe.transform.scale
+                         : key == QLatin1String("rotation") ? probe.transform.rotation
+                         : key == QLatin1String("opacity") ? probe.opacity
+                                                           : value;
+        const qint64 local = std::clamp<qint64>(at - s.start, 0, s.duration);
+        for (KeyPoint &k : *track) {
+            if (std::abs(k.t - local) < 20'000) {
+                k.v = v;
+                return;
+            }
+        }
+        track->append(KeyPoint{local, v, QStringLiteral("ease-in-out")});
+        std::sort(track->begin(), track->end(), [](const KeyPoint &a, const KeyPoint &b) { return a.t < b.t; });
+    });
 }
 
 static void applyTextProperty(Segment &s, const QString &key, const QVariant &v)
@@ -488,6 +576,9 @@ static void applyTextProperty(Segment &s, const QString &key, const QVariant &v)
     else if (key == QLatin1String("outlineColor")) t.outlineColor = v.toString();
     else if (key == QLatin1String("background")) t.background = v.toString();
     else if (key == QLatin1String("align")) t.align = v.toString();
+    else if (key == QLatin1String("shape")) t.shape = v.toString() == QLatin1String("rounded") ? QString() : v.toString();
+    else if (key == QLatin1String("shadow")) t.shadow = v.toString();
+    else if (key == QLatin1String("gradient")) t.gradient = v.toString();
 }
 
 void Project::setTextProperty(const QString &segmentId, const QString &key, const QVariant &value, bool commit)
@@ -504,8 +595,8 @@ QString Project::addText(const QString &text, qint64 at, qint64 duration, const 
     seg.start = std::max<qint64>(0, at);
     seg.duration = duration > 0 ? duration : kTextDefaultUs;
     seg.text.text = text;
-    if (!mtg::applyTextPreset(preset, &seg.text, &seg.transform))
-        mtg::applyTextPreset(QStringLiteral("title"), &seg.text, &seg.transform);
+    if (!mtg::applyTextPreset(preset, &seg.text, &seg.transform, &seg.motion))
+        mtg::applyTextPreset(QStringLiteral("title"), &seg.text, &seg.transform, &seg.motion);
     const bool ok = edit([&](Draft &d) {
         d.ensureTextMaterial();
         place(d, seg, {}, TrackRole::Overlay);
@@ -521,14 +612,18 @@ void Project::applyTextPreset(const QString &segmentId, const QString &preset)
     edit([&](Draft &d) {
         Segment *s = d.segment(segmentId);
         if (!s || s->materialId != kTextMaterialId) return false;
-        return mtg::applyTextPreset(preset, &s->text, &s->transform);
+        return mtg::applyTextPreset(preset, &s->text, &s->transform, &s->motion);
     });
 }
 
 QStringList Project::textPresets() const
 {
-    return {QStringLiteral("title"), QStringLiteral("subtitle"), QStringLiteral("caption"),
-            QStringLiteral("lower-third"), QStringLiteral("end-card")};
+    return textPresetNames();
+}
+
+QStringList Project::textShapes() const
+{
+    return textShapeNames();
 }
 
 bool Project::applyDraft(const Draft &draft)
@@ -558,6 +653,234 @@ void Project::resetTransform(const QString &segmentId)
         s->opacity = 1.0;
         return true;
     });
+}
+
+void Project::setMotion(const QString &segmentId, const QString &slot, const QString &name, double seconds)
+{
+    if (!name.isEmpty() && !mtg::motionNames(slot).contains(name)) return;
+    edit([&](Draft &d) {
+        Segment *s = d.segment(segmentId);
+        if (!s) return false;
+        const qint64 us = seconds > 0 ? qint64(seconds * 1e6) : 0;
+        if (slot == QLatin1String("in")) {
+            s->motion.in = name;
+            if (us > 0) s->motion.inUs = us;
+        } else if (slot == QLatin1String("out")) {
+            s->motion.out = name;
+            if (us > 0) s->motion.outUs = us;
+        } else if (slot == QLatin1String("loop")) {
+            s->motion.loop = name;
+        } else {
+            return false;
+        }
+        return true;
+    });
+}
+
+QStringList Project::motionNames(const QString &slot) const
+{
+    return mtg::motionNames(slot);
+}
+
+void Project::addKeyframe(const QString &segmentId, qint64 t)
+{
+    edit([&](Draft &d) {
+        Segment *s = d.segment(segmentId);
+        if (!s) return false;
+        const qint64 local = std::clamp<qint64>(t - s->start, 0, s->duration);
+        // Value the clip shows right now (keyframes only, not entrance/exit motions).
+        Segment still = *s;
+        still.motion = Motion{};
+        const FrameState now = animate(still, local);
+        const QList<QPair<QString, double>> values{{"x", now.x}, {"y", now.y}, {"scale", now.scale},
+                                                   {"rotation", now.rotation}, {"opacity", now.opacity}};
+        for (const auto &[prop, v] : values) {
+            QList<KeyPoint> &track = s->keys[prop];
+            track.removeIf([&](const KeyPoint &k) { return std::abs(k.t - local) < 20'000; });
+            track.append(KeyPoint{local, v, QStringLiteral("ease-in-out")});
+            std::sort(track.begin(), track.end(), [](const KeyPoint &a, const KeyPoint &b) { return a.t < b.t; });
+        }
+        return true;
+    });
+}
+
+void Project::clearKeyframes(const QString &segmentId)
+{
+    edit([&](Draft &d) {
+        Segment *s = d.segment(segmentId);
+        if (!s || s->keys.isEmpty()) return false;
+        s->keys.clear();
+        return true;
+    });
+}
+
+void Project::addEffect(const QString &segmentId, const QString &name, double amount)
+{
+    if (!mtg::effectNames().contains(name) && !mtg::momentNames().contains(name)) return;
+    edit([&](Draft &d) {
+        Segment *s = d.segment(segmentId);
+        if (!s) return false;
+        s->effects.append(Effect{name, amount, {}});
+        return true;
+    });
+}
+
+void Project::removeEffect(const QString &segmentId, int index)
+{
+    edit([&](Draft &d) {
+        Segment *s = d.segment(segmentId);
+        if (!s || index < 0 || index >= s->effects.size()) return false;
+        s->effects.removeAt(index);
+        return true;
+    });
+}
+
+void Project::setEffectAmount(const QString &segmentId, int index, double amount, bool commit)
+{
+    if (const Segment *s = std::as_const(m_draft).segment(segmentId); !s || index < 0 || index >= s->effects.size()) return;
+    liveOrCommit(segmentId, commit, [&](Segment &s) { s.effects[index].amount = std::clamp(amount, -1.0, 2.0); });
+}
+
+QString Project::addEffectLayer(const QString &name, qint64 at, qint64 duration)
+{
+    if (!mtg::effectNames().contains(name) && !mtg::momentNames().contains(name)) return {};
+    Segment seg;
+    seg.id = Draft::newId();
+    seg.materialId = kEffectMaterialId;
+    seg.start = std::max<qint64>(0, at);
+    seg.duration = duration > 0 ? duration : (mtg::momentNames().contains(name) ? 500'000 : 3'000'000);
+    seg.effects.append(Effect{name, 1.0, {}});
+    const bool ok = edit([&](Draft &d) {
+        d.ensureEffectMaterial();
+        Track fresh;  // its own track, on top, so it affects everything beneath
+        fresh.id = Draft::newId();
+        fresh.role = TrackRole::Overlay;
+        fresh.segments.append(seg);
+        d.tracks.append(fresh);
+        return true;
+    });
+    if (!ok) return {};
+    setSelectedId(seg.id);
+    return seg.id;
+}
+
+QStringList Project::effectNames() const
+{
+    QStringList names = mtg::effectNames();
+    names.removeAll(QStringLiteral("lut"));  // needs a file; offered separately
+    return names;
+}
+
+QStringList Project::momentNames() const
+{
+    return mtg::momentNames();
+}
+
+void Project::setTransition(const QString &segmentId, const QString &name, double seconds)
+{
+    if (!name.isEmpty() && !mtg::transitionNames().contains(name)) return;
+    edit([&](Draft &d) {
+        QList<Segment> &main = d.mainTrack().segments;
+        for (qsizetype i = 1; i < main.size(); ++i) {
+            if (main[i].id != segmentId) continue;
+            main[i].transition.name = name;
+            if (seconds > 0) main[i].transition.us = qint64(seconds * 1e6);
+            return true;
+        }
+        return false;  // not on the main track, or the first clip
+    });
+}
+
+void Project::setFraming(const QString &segmentId, const QString &framing)
+{
+    if (!mtg::framingNames().contains(framing)) return;
+    edit([&](Draft &d) {
+        Track *owner = nullptr;
+        Segment *s = d.segment(segmentId, &owner);
+        if (!s || owner->role != TrackRole::Main || s->framing == framing) return false;
+        s->framing = framing;
+        return true;
+    });
+}
+
+QStringList Project::framingNames() const
+{
+    return mtg::framingNames();
+}
+
+QStringList Project::transitionNames() const
+{
+    return mtg::transitionNames();
+}
+
+void Project::setSpeed(const QString &segmentId, double speed, const QString &curve)
+{
+    if (!curve.isEmpty() && !speedCurveNames().contains(curve)) return;
+    edit([&](Draft &d) {
+        Segment *s = d.segment(segmentId);
+        const Material *m = s ? d.material(s->materialId) : nullptr;
+        if (!s || !m || m->kind != MaterialKind::Video) return false;
+        speed = std::clamp(speed, 0.1, 8.0);
+        // Keep the footage the clip shows; the timeline length follows.
+        const qint64 span = s->speed > 0 ? s->sourceSpan() : s->duration;
+        const qint64 available = m->durationUs - s->sourceStart;
+        s->duration = std::max(kMinSegmentUs, qint64(double(std::min(span, available)) / speed));
+        s->speed = speed;
+        s->curve = curve;
+        return true;
+    });
+}
+
+QStringList Project::speedCurves() const
+{
+    return speedCurveNames();
+}
+
+bool Project::freezeFrame(qint64 t, double seconds)
+{
+    QString targetId;
+    for (const Segment &s : m_draft.tracks[0].segments)
+        if (s.contains(t) && t - s.start >= kMinSegmentUs / 2) targetId = s.id;
+    if (targetId.isEmpty()) return false;
+    const QString freezeId = Draft::newId();
+    const bool ok = edit([&](Draft &d) {
+        QList<Segment> &main = d.mainTrack().segments;
+        for (qsizetype i = 0; i < main.size(); ++i) {
+            if (main[i].id != targetId) continue;
+            Segment &left = main[i];
+            const qint64 local = t - left.start;
+            Segment hold = left;
+            hold.id = freezeId;
+            hold.sourceStart = left.sourceAt(local);
+            hold.speed = 0;
+            hold.curve.clear();
+            hold.duration = qint64(std::clamp(seconds, 0.1, 30.0) * 1e6);
+            hold.motion = Motion{};
+            hold.keys.clear();
+            hold.transition = Transition{};
+            Segment right = left;
+            right.id = Draft::newId();
+            right.sourceStart = hold.sourceStart;
+            right.duration = left.duration - local;
+            right.motion.in.clear();
+            right.transition = Transition{};
+            right.keys.clear();
+            left.duration = local;
+            left.motion.out.clear();
+            left.curve.clear();
+            right.curve.clear();
+            // Decide before inserting: inserting can reallocate and invalidate `left`.
+            const bool keepLeft = left.duration >= kMinSegmentUs;
+            const bool keepRight = right.duration >= kMinSegmentUs;
+            main.insert(i + 1, hold);
+            if (keepRight) main.insert(i + 2, right);
+            if (!keepLeft) main.removeAt(i);
+            return true;
+        }
+        return false;
+    });
+    if (ok) setSelectedId(freezeId);
+    return ok;
 }
 
 void Project::setAspect(const QString &aspect)

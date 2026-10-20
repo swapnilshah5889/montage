@@ -1,0 +1,201 @@
+{
+  "about": "Ad and effects eval (holdout: never tune prompts against it). Run: Montage --eval tests/eval/ads-holdout.json --media tests/media --profile <id>",
+  "cases": [
+    {
+      "name": "elegant-jewelry",
+      "media": [
+        "forest.mp4",
+        "beach.mp4",
+        "song.mp3"
+      ],
+      "requests": [
+        "Create an elegant 12 second ad for my jewelry store Lumen, with the song"
+      ],
+      "checks": [
+        {
+          "type": "style",
+          "any_of": [
+            "elegant",
+            "luxury"
+          ]
+        },
+        {
+          "type": "length",
+          "min": 11.5,
+          "max": 12.5
+        },
+        {
+          "type": "transitions",
+          "min": 1
+        },
+        {
+          "type": "text",
+          "contains": "Lumen"
+        },
+        {
+          "type": "audio",
+          "media": "song.mp3"
+        }
+      ]
+    },
+    {
+      "name": "vintage-look",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ]
+      },
+      "requests": [
+        "Give it a vintage film look"
+      ],
+      "checks": [
+        {
+          "type": "main_effect",
+          "all": true
+        },
+        {
+          "type": "length",
+          "min": 9.9,
+          "max": 10.1
+        }
+      ]
+    },
+    {
+      "name": "punch-every-cut",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 3
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 3
+          },
+          {
+            "media": "m3",
+            "from": 0,
+            "to": 3
+          }
+        ]
+      },
+      "requests": [
+        "Add a zoom punch on every cut"
+      ],
+      "checks": [
+        {
+          "type": "moment",
+          "effect": "zoom-punch",
+          "at_min": 2.8,
+          "at_max": 3.2
+        },
+        {
+          "type": "moment",
+          "effect": "zoom-punch",
+          "at_min": 5.8,
+          "at_max": 6.2
+        }
+      ]
+    },
+    {
+      "name": "title-pop",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ],
+        "texts": [
+          {
+            "text": "Hello",
+            "at": 0,
+            "duration": 3,
+            "style": "title"
+          }
+        ]
+      },
+      "requests": [
+        "Make the title pop in"
+      ],
+      "checks": [
+        {
+          "type": "text",
+          "contains": "Hello",
+          "animated": true
+        },
+        {
+          "type": "text_count",
+          "min": 1,
+          "max": 1
+        }
+      ]
+    },
+    {
+      "name": "speed-up-city",
+      "media": [
+        "beach.mp4",
+        "city.mov"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 6
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4
+          }
+        ]
+      },
+      "requests": [
+        "Speed up the city clip 2x"
+      ],
+      "checks": [
+        {
+          "type": "speed",
+          "media": "city.mov",
+          "fast": true
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        }
+      ]
+    }
+  ]
+}

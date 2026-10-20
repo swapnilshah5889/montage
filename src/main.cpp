@@ -4,9 +4,13 @@
 #include "app/Player.h"
 #include "app/Project.h"
 #include "engine/ExportJob.h"
+#include "engine/Renderer.h"
+#include "ai/EditPlan.h"
 
 #include <QCommandLineParser>
+#include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
@@ -69,7 +73,13 @@ int main(int argc, char *argv[])
     const QCommandLineOption onlyOpt("only", "Run only eval cases whose name contains this.", "text");
     const QCommandLineOption typeOpt("ui-type", "Type into the chat box and press Enter once the window is up.", "text");
     const QCommandLineOption waitOpt("ui-wait", "Seconds before --screenshot is taken (default 3).", "seconds");
-    cli.addOptions({typeOpt, waitOpt});
+    const QCommandLineOption quitOpt("quit", "Quit after loading, importing and saving (no window).");
+    const QCommandLineOption frameOpt("frame", "Render one frame at <seconds> to --frame-out, then quit.", "seconds");
+    const QCommandLineOption frameOutOpt("frame-out", "PNG path for --frame.", "png");
+    const QCommandLineOption planOpt("plan", "Apply an edit plan (JSON) to the project.", "plan.json");
+    const QCommandLineOption formatsOpt("formats", "With --export: one file per shape, e.g. 9:16,1:1,16:9.", "shapes");
+    const QCommandLineOption openUiOpt("ui-open", "Open popups / check controls by objectName (comma-separated) once the window is up.", "names");
+    cli.addOptions({typeOpt, waitOpt, quitOpt, frameOpt, frameOutOpt, planOpt, openUiOpt, formatsOpt});
     cli.addOptions({openOpt, importOpt, overlayOpt, saveOpt, exportOpt, shotOpt, seekOpt, selectOpt, playOpt, textOpt,
                     profileOpt, agentOpt, evalOpt, mediaOpt, onlyOpt});
     cli.process(app);
@@ -94,15 +104,41 @@ int main(int argc, char *argv[])
         if (cli.isSet(saveOpt)) project.save(QUrl::fromLocalFile(QFileInfo(cli.value(saveOpt)).absoluteFilePath()));
         if (!cli.isSet(shotOpt)) return rc;
     }
+    if (cli.isSet(planOpt)) {
+        QFile f(cli.value(planOpt));
+        if (!f.open(QIODevice::ReadOnly)) {
+            std::fprintf(stderr, "cannot read %s\n", qPrintable(cli.value(planOpt)));
+            return 2;
+        }
+        mtg::ai::PlanReport report;
+        const mtg::Draft next = mtg::ai::draftFromPlan(project.draft(), QJsonDocument::fromJson(f.readAll()).object(),
+                                                       mtg::ai::MediaIndex(project.draft()), &report);
+        if (!report.text().isEmpty()) std::fprintf(stderr, "%s\n", qPrintable(report.text()));
+        if (!report.ok()) return 1;
+        project.applyDraft(next);
+    }
     if (cli.isSet(saveOpt)) project.save(QUrl::fromLocalFile(QFileInfo(cli.value(saveOpt)).absoluteFilePath()));
+    if (cli.isSet(frameOpt)) {
+        mtg::Renderer renderer;
+        renderer.setDraft(project.draft());
+        const QImage img = renderer.renderVideo(qint64(cli.value(frameOpt).toDouble() * 1e6), renderer.fitCanvas(QSize(960, 960)));
+        return img.save(cli.value(frameOutOpt)) ? 0 : 1;
+    }
+    if (cli.isSet(quitOpt) && !cli.isSet(exportOpt)) return 0;
 
     if (cli.isSet(exportOpt)) {
-        const mtg::ExportResult res = mtg::exportDraft(project.draft(), cli.value(exportOpt), [](double p) {
-            std::fprintf(stderr, "\rexport %3d%%", int(p * 100));
-            return true;
-        });
-        std::fprintf(stderr, "\n%s\n", qPrintable(res.message));
-        return res.ok ? 0 : 1;
+        const QStringList formats = cli.value(formatsOpt).split(QLatin1Char(','), Qt::SkipEmptyParts);
+        const QStringList paths = Exporter::outputPaths(cli.value(exportOpt), formats);
+        for (qsizetype i = 0; i < paths.size(); ++i) {
+            const mtg::Draft d = formats.isEmpty() ? project.draft() : mtg::ai::resizedDraft(project.draft(), formats[i]);
+            const mtg::ExportResult res = mtg::exportDraft(d, paths[i], [](double p) {
+                std::fprintf(stderr, "\rexport %3d%%", int(p * 100));
+                return true;
+            });
+            std::fprintf(stderr, "\n%s: %s\n", qPrintable(paths[i]), qPrintable(res.message));
+            if (!res.ok) return 1;
+        }
+        return 0;
     }
 
     if (cli.isSet(seekOpt)) player.seek(qint64(cli.value(seekOpt).toDouble() * 1e6));
@@ -138,6 +174,23 @@ int main(int argc, char *argv[])
             QCoreApplication::sendEvent(window, &enter);
             std::fprintf(stderr, "ui-type: after Enter the field holds \"%s\", agent busy=%d\n",
                          qPrintable(input->property("text").toString()), Agent::instance()->busy());
+        });
+    }
+
+    // UI test hook: open a popup (or check a button) by objectName.
+    if (cli.isSet(openUiOpt) && !engine.rootObjects().isEmpty()) {
+        QObject *root = engine.rootObjects().first();
+        const QStringList names = cli.value(openUiOpt).split(QLatin1Char(','), Qt::SkipEmptyParts);
+        QTimer::singleShot(800, &app, [root, names] {
+            for (const QString &name : names) {
+                QObject *obj = root->findChild<QObject *>(name);
+                if (!obj) {
+                    std::fprintf(stderr, "ui-open: %s not found\n", qPrintable(name));
+                    continue;
+                }
+                if (obj->metaObject()->indexOfMethod("open()") >= 0) QMetaObject::invokeMethod(obj, "open");
+                else obj->setProperty("checked", true);
+            }
         });
     }
 

@@ -2,6 +2,8 @@
 
 #include "Exporter.h"
 #include "Project.h"
+#include "ai/AdStyles.h"
+#include "ai/Brand.h"
 #include "ai/EditPlan.h"
 #include "ai/EditorTools.h"
 #include "ai/Keychain.h"
@@ -374,6 +376,24 @@ void Agent::ensureProvider()
     m_provider->setProfile(m_profile, apiKeyFor(m_profile));
 }
 
+QVariantMap Agent::brand() const
+{
+    return loadBrandKit().toMap();
+}
+
+void Agent::setBrand(const QVariantMap &brand)
+{
+    BrandKit kit = BrandKit::fromMap(brand);
+    if (kit.toMap() == loadBrandKit().toMap()) return;
+    saveBrandKit(kit);
+    emit brandChanged();
+}
+
+QStringList Agent::adStyles() const
+{
+    return adStyleNames();
+}
+
 void Agent::send(const QString &text)
 {
     const QString request = text.trimmed();
@@ -394,6 +414,11 @@ void Agent::send(const QString &text)
     m_rounds = 0;
     m_assistantRow = -1;
     ensureProvider();
+
+    m_tools->setRequest(request);
+    const BrandKit kit = loadBrandKit();
+    if (brandApplies(request, kit) && !kit.logo.isEmpty() && QFileInfo::exists(kit.logo))
+        m_project->importFiles({QUrl::fromLocalFile(kit.logo)});  // no-op once imported
 
     const QStringList imported = m_tools->importMentionedPaths(request);
     if (!imported.isEmpty())
@@ -578,6 +603,15 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
     const double wanted = requestedLength(m_request);
     if (wanted > 0 && fitToLength(wanted, current, index, &plan))
         notes << QStringLiteral("fitted the clips to %1 seconds").arg(wanted);
+    if (addAdMusic(m_request, currentPlan, current, index, &plan)) notes << QStringLiteral("added music under the ad");
+    if (snapEndTexts(m_request, currentPlan, &plan)) notes << QStringLiteral("moved the end text to finish with the video");
+    notes += applyObviousFeatures(m_request, current, index, &plan);
+    if (const QStringList formats = requestedFormats(m_request); !formats.isEmpty()) {
+        plan.insert("export", true);
+        plan.insert("export_formats", QJsonArray::fromStringList(formats));
+    }
+    notes += applyBrand(m_request, loadBrandKit(), currentPlan, current, index, &plan);
+    notes += applyAdStyle(currentPlan, current, index, &plan);
 
     PlanReport report;
     const Draft next = draftFromPlan(current, plan, index, &report);
@@ -603,6 +637,11 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
     m_project->applyDraft(next);
     QString reply = plan.value("reply").toString().trimmed();
     if (reply.isEmpty()) reply = QStringLiteral("Done.");
+    // The app may have changed the style the model chose (brand kit); keep the reply truthful.
+    const QString modelStyle = modelPlan.value("style").toString().trimmed().toLower();
+    if (!modelStyle.isEmpty() && !next.style.isEmpty() && modelStyle != next.style)
+        reply.replace(QRegularExpression(QStringLiteral("\\b%1\\b").arg(QRegularExpression::escape(modelStyle)),
+                                         QRegularExpression::CaseInsensitiveOption), next.style);
     m_chat->add("assistant", reply);
     notes += report.warnings;
     if (!notes.isEmpty()) m_chat->add("activity", QStringLiteral("Adjusted: ") + notes.join("; "));
@@ -610,7 +649,9 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
 
     if (plan.value("export").toBool()) {
         setStatus(QStringLiteral("Exporting…"));
-        m_tools->exportVideo(m_project->name(), [this, reply](bool ok, const QString &msg) {
+        QStringList formats;
+        for (const QJsonValue &v : plan.value("export_formats").toArray()) formats << v.toString();
+        m_tools->exportVideo(m_project->name(), formats, [this, reply](bool ok, const QString &msg) {
             m_chat->add(ok ? "activity" : "error", ok ? QStringLiteral("Exported to ") + msg : msg);
             finish(ok, reply);
         });
@@ -732,6 +773,27 @@ QString Agent::planFeedback(const QJsonObject &current, const QJsonObject &plan,
         }
     }
 
+    // Offers and calls to action the user wants on screen, even unquoted.
+    {
+        QString allText;
+        for (const QJsonValue &t : plan.value("texts").toArray()) allText += t.toObject().value("text").toString().toLower() + '\n';
+        static const QRegularExpression offer(QStringLiteral(
+            R"((\$\s?\d+(?:[.,]\d{1,2})?|\d{1,3}\s?%(?:\s?off)?|\b(?:shop|buy|order|book|sign up|subscribe|download|learn more|get yours|join)(?: it| one)? now\b|\blink in bio\b))"),
+            QRegularExpression::CaseInsensitiveOption);
+        const bool removingText = wants(R"(\b(remove|delete|without|get rid|take (it |them )?(off|out))\b)");
+        for (auto it = offer.globalMatch(m_request); it.hasNext() && !removingText;) {
+            const QString want = it.next().captured(1).trimmed();
+            QString loose = want.toLower();
+            loose.remove(QLatin1Char(' '));
+            QString have = allText;
+            have.remove(QLatin1Char(' '));
+            if (!have.contains(loose))
+                problems << QStringLiteral("The request asks for \"%1\" on screen but no item in \"texts\" has it. Add a text with it "
+                                           "(style \"price\" or \"badge\" for prices and discounts, \"cta\" for a call to action like Shop now).")
+                                .arg(want);
+        }
+    }
+
     if (wants(R"(\b(music|song|soundtrack|track|background audio|beat)\b)")
         && !wants(R"(\b(remove|delete|no|without|mute|rid|drop|lose|stop|cut|take out|turn off|silence)\b)")
         && plan.value("audio").toArray().isEmpty()) {
@@ -742,5 +804,6 @@ QString Agent::planFeedback(const QJsonObject &current, const QJsonObject &plan,
         if (haveAudio)
             problems << QStringLiteral("The user asked for music: put the audio file (type audio in MEDIA) in \"audio\".");
     }
+    problems += missingFeatures(m_request, plan);
     return problems.join('\n');
 }

@@ -65,7 +65,7 @@ Rectangle {
         y: 4
         visible: item.width > 34
         width: Math.min(implicitWidth, item.width - 16)
-        text: (item.seg.kind === "audio" ? "♪ " : item.seg.kind === "text" ? "T  " : "") + item.seg.name + "   " + Project.formatTime(item.seg.duration, false)
+        text: (item.seg.kind === "audio" ? "♪ " : item.seg.kind === "text" ? "T  " : item.seg.kind === "effect" ? "✧ " : "") + item.seg.name + "   " + Project.formatTime(item.seg.duration, false)
         elide: Text.ElideRight
         color: "white"
         font.pixelSize: 11
@@ -107,6 +107,50 @@ Rectangle {
         onCanceled: item.restore()
     }
 
+    // Transition into this clip
+    Rectangle {
+        visible: !!item.seg.transition
+        x: -1
+        width: Math.min(item.timeline.xOf(item.seg.transitionSec * 1e6 / 2), item.width / 2)
+        height: parent.height
+        gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0; color: "#cc1fd1c1" }
+            GradientStop { position: 1; color: "#001fd1c1" }
+        }
+        ToolTip.visible: trHover.hovered
+        ToolTip.text: "Transition: " + item.seg.transition
+        HoverHandler { id: trHover }
+    }
+
+    // Keyframe markers
+    Repeater {
+        model: item.seg.keyframes || []
+        Rectangle {
+            required property var modelData
+            width: 9; height: 9
+            rotation: 45
+            x: item.timeline.xOf(modelData * 1e6) - width / 2 - item.trimL
+            y: item.height - 12
+            color: "#ffd60a"
+            border.color: "#000000"
+            border.width: 1
+        }
+    }
+    Label {
+        visible: (item.seg.motionIn || item.seg.motionOut || item.seg.motionLoop) && item.width > 60
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: 4
+        text: "✦"
+        color: "white"
+        font.pixelSize: 11
+        ToolTip.visible: hoverMotion.hovered
+        ToolTip.text: [item.seg.motionIn ? "in: " + item.seg.motionIn : "", item.seg.motionOut ? "out: " + item.seg.motionOut : "",
+                       item.seg.motionLoop ? "loop: " + item.seg.motionLoop : ""].filter(x => x).join(" · ")
+        HoverHandler { id: hoverMotion }
+    }
+
     // Edge grips
     Repeater {
         model: 2
@@ -141,7 +185,7 @@ Rectangle {
             const t = item.timeline
             const s = item.seg
             const dx = mapToItem(t, m.x, 0).x - startX
-            const minStart = (s.kind === "image" || s.kind === "text") ? -1e15 : s.start - s.sourceStart
+            const minStart = (s.kind === "image" || s.kind === "text" || s.kind === "effect") ? -1e15 : s.start - s.sourceStart
             let start = t.snapEdge(s.start + dx * t.usPerPx, s.id)
             start = Math.max(minStart, Math.min(start, s.start + s.duration - 100000))
             item.trimL = t.xOf(start - s.start)
@@ -172,7 +216,7 @@ Rectangle {
             const t = item.timeline
             const s = item.seg
             const dx = mapToItem(t, m.x, 0).x - startX
-            const maxEnd = (s.kind === "image" || s.kind === "text") ? 1e15 : s.start + (s.materialDuration - s.sourceStart)
+            const maxEnd = (s.kind === "image" || s.kind === "text" || s.kind === "effect") ? 1e15 : s.start + (s.materialDuration - s.sourceStart)
             let end = t.snapEdge(s.start + s.duration + dx * t.usPerPx, s.id)
             end = Math.min(maxEnd, Math.max(end, s.start + 100000))
             item.trimR = t.xOf(end - (s.start + s.duration))

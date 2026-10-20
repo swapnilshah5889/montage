@@ -46,7 +46,7 @@ ApplicationWindow {
         onNewRequested: Project.newProject()
         onOpenRequested: openDialog.open()
         onSaveRequested: win.save()
-        onExportRequested: exportDialog.open()
+        onExportRequested: exportOptions.open()
     }
 
     // Files dropped from Finder
@@ -85,6 +85,7 @@ ApplicationWindow {
                 SplitView.preferredWidth: 400
                 SplitView.minimumWidth: 300
                 onSettingsRequested: modelSettings.open()
+                onBrandRequested: brandSettings.open()
                 onImportRequested: importDialog.open()
             }
             PlayerPanel {
@@ -137,6 +138,7 @@ ApplicationWindow {
                     target: Project
                     function onSelectionChanged() { if (Project.selectedId !== "") sideTabs.currentIndex = 1 }
                 }
+                Component.onCompleted: if (Project.selectedId !== "") sideTabs.currentIndex = 1
             }
         }
 
@@ -187,17 +189,120 @@ ApplicationWindow {
     }
     FileDialog {
         id: exportDialog
-        title: "Export video"
+        property var formats: []
+        title: formats.length > 1 ? "Export " + formats.length + " formats" : "Export video"
         fileMode: FileDialog.SaveFile
         defaultSuffix: "mp4"
         nameFilters: ["MPEG-4 video (*.mp4)"]
         onAccepted: {
             Player.pause()
-            Exporter.start(selectedFile)
+            Exporter.start(selectedFile, formats)
+        }
+    }
+
+    // Export: this shape, or several at once (one file each, reframed).
+    Popup {
+        id: exportOptions
+        objectName: "exportOptions"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 440
+        padding: 22
+        background: Rectangle { color: Theme.panel; radius: 10; border.color: Theme.border }
+        property var picked: ({"9:16": true, "4:5": false, "1:1": true, "16:9": true})
+        readonly property var shapes: [
+            { name: "9:16", label: "Vertical", hint: "TikTok · Reels · Shorts · Stories" },
+            { name: "4:5", label: "Portrait", hint: "Instagram & Facebook feed" },
+            { name: "1:1", label: "Square", hint: "Feed posts · marketplaces" },
+            { name: "16:9", label: "Landscape", hint: "YouTube · web · TV" }
+        ]
+        function chosen() {
+            return shapes.map(s => s.name).filter(n => picked[n])
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 12
+            Label { text: "Export"; font.pixelSize: 16; font.bold: true; color: Theme.text }
+
+            RadioButton {
+                id: oneShape
+                checked: true
+                focusPolicy: Qt.NoFocus
+                text: "This shape (" + Project.canvasWidth + "×" + Project.canvasHeight + ")"
+            }
+            RadioButton {
+                id: manyShapes
+                objectName: "exportManyShapes"
+                focusPolicy: Qt.NoFocus
+                text: "Every platform at once"
+            }
+            Label {
+                Layout.fillWidth: true
+                Layout.leftMargin: 30
+                visible: manyShapes.checked
+                wrapMode: Text.WordWrap
+                color: Theme.textDim
+                font.pixelSize: 12
+                text: "One file per shape. Clips are reframed around their subject, and text and logos move to fit."
+            }
+            Repeater {
+                model: exportOptions.shapes
+                delegate: RowLayout {
+                    required property var modelData
+                    Layout.leftMargin: 26
+                    visible: manyShapes.checked
+                    spacing: 8
+                    CheckBox {
+                        focusPolicy: Qt.NoFocus
+                        checked: !!exportOptions.picked[modelData.name]
+                        onToggled: {
+                            const p = Object.assign({}, exportOptions.picked)
+                            p[modelData.name] = checked
+                            exportOptions.picked = p
+                        }
+                    }
+                    Item {  // shape icon
+                        implicitWidth: 22
+                        implicitHeight: 22
+                        Rectangle {
+                            readonly property var wh: modelData.name.split(":").map(Number)
+                            readonly property real k: 20 / Math.max(wh[0], wh[1])
+                            anchors.centerIn: parent
+                            width: wh[0] * k
+                            height: wh[1] * k
+                            color: "transparent"
+                            border.color: Theme.accent
+                            border.width: 1.5
+                            radius: 2
+                        }
+                    }
+                    Label { text: modelData.name; color: Theme.text; font.bold: true; Layout.preferredWidth: 38 }
+                    Label { text: modelData.label + "  ·  " + modelData.hint; color: Theme.textDim; font.pixelSize: 12 }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: 6
+                Item { Layout.fillWidth: true }
+                FlatButton { text: "Cancel"; onClicked: exportOptions.close() }
+                FlatButton {
+                    text: manyShapes.checked ? "Export " + exportOptions.chosen().length + " files…" : "Export…"
+                    accent: true
+                    enabled: oneShape.checked || exportOptions.chosen().length > 0
+                    onClicked: {
+                        exportDialog.formats = manyShapes.checked ? exportOptions.chosen() : []
+                        exportOptions.close()
+                        exportDialog.open()
+                    }
+                }
+            }
         }
     }
 
     ModelSettings { id: modelSettings }
+    BrandSettings { id: brandSettings }
 
     Popup {
         id: exportPopup
@@ -213,6 +318,7 @@ ApplicationWindow {
             anchors.fill: parent
             spacing: 14
             Label { text: "Exporting video…"; font.pixelSize: 15; font.bold: true; color: Theme.text }
+            Label { text: Exporter.stage; visible: Exporter.stage !== ""; color: Theme.textDim; font.pixelSize: 12 }
             ProgressBar { Layout.fillWidth: true; value: Exporter.progress }
             RowLayout {
                 Layout.fillWidth: true
@@ -254,8 +360,11 @@ ApplicationWindow {
     }
     Connections {
         target: Exporter
-        function onFinished(ok, message, file) {
-            win.showToast(ok ? "Saved " + decodeURIComponent(file.toString().replace("file://", "")) : message)
+        function onFinished(ok, message, file, files) {
+            if (ok && files.length > 1)
+                win.showToast("Saved " + files.length + " formats next to " + decodeURIComponent(file.toString().replace("file://", "")).split("/").pop())
+            else
+                win.showToast(ok ? "Saved " + decodeURIComponent(file.toString().replace("file://", "")) : message)
         }
     }
 }

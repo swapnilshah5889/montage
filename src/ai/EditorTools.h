@@ -33,7 +33,12 @@ public:
     // Frames sampled from the first few videos/photos, one sheet per file.
     QList<QByteArray> mediaSheets(int maxFiles) const;
 
-    void exportVideo(const QString &name, const std::function<void(bool, QString)> &done);
+    // The user's request being worked on (brand kit and styles key off it).
+    void setRequest(const QString &request) { m_request = request; }
+
+    // Exports to Movies/Montage. With `formats`, one file per shape. `done`
+    // gets the written paths (one per line) or the error.
+    void exportVideo(const QString &name, const QStringList &formats, const std::function<void(bool, QString)> &done);
 
 private:
     ToolResult lookAtMedia(const ToolCall &call) const;
@@ -44,6 +49,7 @@ private:
 
     Project *m_project;
     Exporter *m_exporter;
+    QString m_request;
 };
 
 // Lays frames out in a labelled grid and encodes it as JPEG.

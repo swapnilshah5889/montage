@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QUuid>
 #include <algorithm>
+#include <cmath>
 
 namespace mtg {
 
@@ -13,6 +14,7 @@ QString kindName(MaterialKind k)
     case MaterialKind::Audio: return QStringLiteral("audio");
     case MaterialKind::Image: return QStringLiteral("image");
     case MaterialKind::Text: return QStringLiteral("text");
+    case MaterialKind::Effect: return QStringLiteral("effect");
     }
     return {};
 }
@@ -32,6 +34,7 @@ static MaterialKind kindFromName(const QString &s)
     if (s == QLatin1String("audio")) return MaterialKind::Audio;
     if (s == QLatin1String("image")) return MaterialKind::Image;
     if (s == QLatin1String("text")) return MaterialKind::Text;
+    if (s == QLatin1String("effect")) return MaterialKind::Effect;
     return MaterialKind::Video;
 }
 
@@ -75,9 +78,94 @@ void Draft::ensureTextMaterial()
     materials.append(m);
 }
 
+void Draft::ensureEffectMaterial()
+{
+    if (material(kEffectMaterialId)) return;
+    Material m;
+    m.id = kEffectMaterialId;
+    m.kind = MaterialKind::Effect;
+    m.name = QStringLiteral("Effect");
+    m.hasVideo = true;
+    materials.append(m);
+}
+
+static QJsonArray effectsToJson(const QList<Effect> &fx)
+{
+    QJsonArray a;
+    for (const Effect &e : fx) {
+        QJsonObject o{{"name", e.name}, {"amount", e.amount}};
+        if (!e.path.isEmpty()) o.insert("path", e.path);
+        a.append(o);
+    }
+    return a;
+}
+
+static QList<Effect> effectsFromJson(const QJsonArray &a)
+{
+    QList<Effect> fx;
+    for (const QJsonValue &v : a) {
+        const QJsonObject o = v.toObject();
+        if (o.value("name").toString().isEmpty()) continue;
+        fx.append(Effect{o.value("name").toString(), o.value("amount").toDouble(1.0), o.value("path").toString()});
+    }
+    return fx;
+}
+
+static QJsonObject motionToJson(const Motion &m)
+{
+    QJsonObject o;
+    if (!m.in.isEmpty()) o.insert("in", QJsonObject{{"name", m.in}, {"duration", double(m.inUs)}});
+    if (!m.out.isEmpty()) o.insert("out", QJsonObject{{"name", m.out}, {"duration", double(m.outUs)}});
+    if (!m.loop.isEmpty()) o.insert("loop", QJsonObject{{"name", m.loop}, {"speed", m.loopSpeed}});
+    return o;
+}
+
+static Motion motionFromJson(const QJsonObject &o)
+{
+    Motion m;
+    m.in = o.value("in").toObject().value("name").toString();
+    m.inUs = qint64(o.value("in").toObject().value("duration").toDouble(500'000));
+    m.out = o.value("out").toObject().value("name").toString();
+    m.outUs = qint64(o.value("out").toObject().value("duration").toDouble(400'000));
+    m.loop = o.value("loop").toObject().value("name").toString();
+    m.loopSpeed = o.value("loop").toObject().value("speed").toDouble(1.0);
+    return m;
+}
+
+static QJsonObject keysToJson(const KeyTracks &k)
+{
+    QJsonObject o;
+    for (auto it = k.cbegin(); it != k.cend(); ++it) {
+        QJsonArray pts;
+        for (const KeyPoint &p : it.value())
+            pts.append(QJsonObject{{"t", double(p.t)}, {"v", p.v}, {"ease", p.ease}});
+        o.insert(it.key(), pts);
+    }
+    return o;
+}
+
+static KeyTracks keysFromJson(const QJsonObject &o)
+{
+    KeyTracks k;
+    for (auto it = o.constBegin(); it != o.constEnd(); ++it) {
+        QList<KeyPoint> pts;
+        for (const QJsonValue &v : it.value().toArray()) {
+            const QJsonObject p = v.toObject();
+            pts.append(KeyPoint{qint64(p.value("t").toDouble()), p.value("v").toDouble(),
+                                p.value("ease").toString(QStringLiteral("ease-in-out"))});
+        }
+        std::sort(pts.begin(), pts.end(), [](const KeyPoint &a, const KeyPoint &b) { return a.t < b.t; });
+        if (!pts.isEmpty()) k.insert(it.key(), pts);
+    }
+    return k;
+}
+
 static QJsonObject textToJson(const TextStyle &t)
 {
     return QJsonObject{
+        {"shadow", t.shadow},
+        {"shape", t.shape},
+        {"gradient", t.gradient},
         {"text", t.text},
         {"font", t.font},
         {"size", t.size},
@@ -102,15 +190,83 @@ static TextStyle textFromJson(const QJsonObject &o)
     t.outlineColor = o.value("outline_color").toString(t.outlineColor);
     t.background = o.value("background").toString();
     t.align = o.value("align").toString(t.align);
+    t.shadow = o.value("shadow").toString();
+    t.shape = o.value("shape").toString();
+    t.gradient = o.value("gradient").toString();
     return t;
 }
 
 // Starting looks for text clips: style plus where it sits on the canvas.
-bool applyTextPreset(const QString &name, TextStyle *st, Transform *tr)
+QStringList framingNames()
+{
+    return {"auto", "fill", "fit", "fit-blur"};
+}
+
+QStringList speedCurveNames()
+{
+    return {"ramp-up", "ramp-down", "hero", "bullet"};
+}
+
+namespace {
+
+// Relative speed over the clip (u in 0..1) for each ramp; integrated and
+// normalised so the clip still plays exactly its source span.
+double rampSpeed(const QString &curve, double u)
+{
+    if (curve == QLatin1String("ramp-up")) return 0.3 + 1.7 * u;
+    if (curve == QLatin1String("ramp-down")) return 2.0 - 1.7 * u;
+    if (curve == QLatin1String("hero")) return 0.2 + 2.2 * std::pow(2 * u - 1, 2);
+    if (curve == QLatin1String("bullet")) return 1.0 - 0.9 * std::exp(-std::pow((u - 0.5) / 0.1, 2));
+    return 1.0;
+}
+
+// Fraction of the source span played by u (0..1).
+double rampProgress(const QString &curve, double u)
+{
+    constexpr int kSteps = 128;
+    double done = 0, total = 0;
+    for (int i = 0; i < kSteps; ++i) {
+        const double a = double(i) / kSteps, b = double(i + 1) / kSteps;
+        const double area = (rampSpeed(curve, a) + rampSpeed(curve, b)) / 2 / kSteps;
+        total += area;
+        if (b <= u) done += area;
+        else if (a < u) done += area * (u - a) * kSteps;
+    }
+    return total > 0 ? done / total : u;
+}
+
+}  // namespace
+
+qint64 Segment::sourceAt(qint64 local) const
+{
+    if (speed <= 0) return sourceStart;  // freeze frame
+    if (curve.isEmpty() || duration <= 0 || local < 0 || local > duration)
+        return sourceStart + qint64(double(local) * speed);
+    return sourceStart + qint64(double(sourceSpan()) * rampProgress(curve, double(local) / double(duration)));
+}
+
+QStringList transitionNames()
+{
+    return {"crossfade", "fade-black", "fade-white", "push-left", "push-right", "push-up", "push-down", "slide-left",
+            "slide-right", "slide-up", "slide-down", "zoom", "whip", "spin", "glitch", "flash", "wipe", "circle", "blur"};
+}
+
+QStringList textPresetNames()
+{
+    return {"title", "subtitle", "caption", "lower-third", "end-card", "headline", "cta", "price", "badge", "kinetic-caption"};
+}
+
+QStringList textShapeNames()
+{
+    return {"rounded", "pill", "circle", "burst", "tag", "ribbon", "underline"};
+}
+
+bool applyTextPreset(const QString &name, TextStyle *st, Transform *tr, Motion *motion)
 {
     const QString text = st->text;
     TextStyle base;
     Transform pos;
+    Motion move;
     if (name == QLatin1String("title")) {
         base.size = 0.11;
         base.outline = 0.05;
@@ -133,12 +289,52 @@ bool applyTextPreset(const QString &name, TextStyle *st, Transform *tr)
     } else if (name == QLatin1String("end-card")) {
         base.size = 0.09;
         base.color = QStringLiteral("#1FD1C1");
+    } else if (name == QLatin1String("headline")) {  // big ad headline
+        base.size = 0.14;
+        base.gradient = QStringLiteral("#FFD60A");
+        base.shadow = QStringLiteral("#000000");
+        pos.y = -0.12;
+        move.in = QStringLiteral("kinetic");
+        move.inUs = 900'000;
+    } else if (name == QLatin1String("cta")) {  // call-to-action button
+        base.size = 0.065;
+        base.background = QStringLiteral("#FF3B30");
+        base.shape = QStringLiteral("pill");
+        pos.y = 0.62;
+        move.in = QStringLiteral("pop");
+        move.loop = QStringLiteral("pulse");
+    } else if (name == QLatin1String("price")) {  // tilted price callout
+        base.size = 0.1;
+        base.color = QStringLiteral("#FFD60A");
+        base.outline = 0.06;
+        base.shadow = QStringLiteral("#000000");
+        pos.x = 0.5;
+        pos.y = -0.5;
+        pos.rotation = -8;
+        move.in = QStringLiteral("pop");
+        move.loop = QStringLiteral("wiggle");
+    } else if (name == QLatin1String("badge")) {  // "NEW" / "50% OFF" starburst
+        base.size = 0.055;
+        base.background = QStringLiteral("#FF2D55");
+        base.shape = QStringLiteral("burst");
+        pos.x = -0.62;
+        pos.y = -0.6;
+        pos.rotation = -12;
+        move.in = QStringLiteral("spin");
+        move.loop = QStringLiteral("pulse");
+    } else if (name == QLatin1String("kinetic-caption")) {  // words pop in one by one
+        base.size = 0.07;
+        base.outline = 0.07;
+        pos.y = 0.35;
+        move.in = QStringLiteral("kinetic");
+        move.inUs = 1'200'000;
     } else {
         return false;
     }
     base.text = text;
     *st = base;
     *tr = pos;
+    if (motion) *motion = move;
     return true;
 }
 
@@ -250,8 +446,17 @@ QJsonObject Draft::toJson() const
                 {"opacity", s.opacity},
                 {"transform", QJsonObject{{"x", s.transform.x},
                                           {"y", s.transform.y},
-                                          {"scale", s.transform.scale}}},
+                                          {"scale", s.transform.scale},
+                                          {"rotation", s.transform.rotation}}},
             };
+            if (!s.motion.isEmpty()) so.insert("motion", motionToJson(s.motion));
+            if (!s.keys.isEmpty()) so.insert("keys", keysToJson(s.keys));
+            if (!s.effects.isEmpty()) so.insert("effects", effectsToJson(s.effects));
+            if (s.speed != 1.0) so.insert("speed", s.speed);
+            if (!s.curve.isEmpty()) so.insert("curve", s.curve);
+            so.insert("framing", s.framing);
+            if (!s.transition.name.isEmpty())
+                so.insert("transition", QJsonObject{{"name", s.transition.name}, {"duration", double(s.transition.us)}});
             if (s.materialId == kTextMaterialId) so.insert("text", textToJson(s.text));
             segs.append(so);
         }
@@ -267,6 +472,7 @@ QJsonObject Draft::toJson() const
                                {"fps", canvas.fps},
                                {"background", canvas.background},
                                {"locked", canvasLocked}}},
+        {"style", style},
         {"materials", mats},
         {"tracks", trks},
     };
@@ -284,6 +490,7 @@ Draft Draft::fromJson(const QJsonObject &obj)
     d.canvas.fps = c.value("fps").toDouble(30);
     d.canvas.background = c.value("background").toString(QStringLiteral("#000000"));
     d.canvasLocked = c.value("locked").toBool(false);
+    d.style = obj.value("style").toString();
 
     for (const QJsonValue &v : obj.value("materials").toArray()) {
         const QJsonObject o = v.toObject();
@@ -321,6 +528,15 @@ Draft Draft::fromJson(const QJsonObject &obj)
             s.transform.x = tr.value("x").toDouble(0);
             s.transform.y = tr.value("y").toDouble(0);
             s.transform.scale = tr.value("scale").toDouble(1);
+            s.transform.rotation = tr.value("rotation").toDouble(0);
+            s.motion = motionFromJson(so.value("motion").toObject());
+            s.keys = keysFromJson(so.value("keys").toObject());
+            s.effects = effectsFromJson(so.value("effects").toArray());
+            s.speed = std::clamp(so.value("speed").toDouble(1.0), 0.0, 16.0);
+            s.curve = so.value("curve").toString();
+            s.framing = so.value("framing").toString(QStringLiteral("fit"));  // drafts from before framing letterboxed
+            s.transition.name = so.value("transition").toObject().value("name").toString();
+            s.transition.us = qint64(so.value("transition").toObject().value("duration").toDouble(500'000));
             if (so.contains("text")) s.text = textFromJson(so.value("text").toObject());
             if (d.material(s.materialId) && s.duration > 0) t.segments.append(s);
         }

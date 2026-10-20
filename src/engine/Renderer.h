@@ -4,13 +4,16 @@
 
 #include <QHash>
 #include <QImage>
+#include <QPainter>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 namespace mtg {
 
 class VideoDecoder;
 class AudioDecoder;
+class EffectProcessor;
 
 // Turns a draft into pictures and sound at any point in time. Preview and
 // export each own one, so both produce exactly the same output (CapCut's
@@ -45,9 +48,15 @@ private:
         quint64 lastUse = 0;
     };
 
+    // `framed`: apply the segment's framing (main track); otherwise fit.
+    void drawMedia(QPainter &p, const Segment &seg, const Material &mat, qint64 t, QSize size, bool framed = false);
+    void drawMainTrack(QPainter &p, const Track &track, qint64 t, QSize size, const QColor &background);
+    void compose(QPainter &p, const QImage &a, const QImage &b, const QString &name, double u, qint64 t, QSize size);
     VideoDecoder *videoFor(const Segment &seg, const Material &mat);
     AudioDecoder *audioFor(const Segment &seg, const Material &mat);
     QImage stillFor(const Material &mat, QSize size);
+    const QImage &original(const Material &mat);
+    bool isGraphic(const Material &mat);
     void evict();
 
     Draft m_draft;
@@ -56,6 +65,8 @@ private:
     QHash<QString, QImage> m_stills;    // keyed by material id
     QHash<QString, QImage> m_stillScaled;
     quint64 m_tick = 0;
+    std::unique_ptr<EffectProcessor> m_fx;  // created on first use
+    std::vector<float> m_resample;          // scratch for time-remapped audio
 };
 
 }  // namespace mtg

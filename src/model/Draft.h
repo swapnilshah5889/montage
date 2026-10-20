@@ -7,11 +7,12 @@
 
 #include <QJsonObject>
 #include <QList>
+#include <QMap>
 #include <QString>
 
 namespace mtg {
 
-enum class MaterialKind { Video, Audio, Image, Text };
+enum class MaterialKind { Video, Audio, Image, Text, Effect };
 enum class TrackRole { Main, Overlay, Audio };
 
 QString kindName(MaterialKind k);
@@ -20,6 +21,7 @@ QString roleName(TrackRole r);
 constexpr qint64 kImageDefaultUs = 5'000'000;
 constexpr qint64 kTextDefaultUs = 3'000'000;
 inline const QString kTextMaterialId = QStringLiteral("text");
+inline const QString kEffectMaterialId = QStringLiteral("fx");  // adjustment layers
 constexpr qint64 kMinSegmentUs = 100'000;
 
 struct Material {
@@ -51,14 +53,69 @@ struct TextStyle {
     QString outlineColor = QStringLiteral("#000000");
     QString background;      // box colour behind the text; empty = none
     QString align = QStringLiteral("center");  // left | center | right
+    QString shadow;          // drop-shadow colour; empty = none
+    QString gradient;        // second fill colour, top to bottom; empty = solid
+    QString shape;           // box shape: rounded (default), pill, circle, burst, tag, ribbon, underline
 
     bool operator==(const TextStyle &) const = default;
 };
 
 struct Transform {
-    double x = 0;      // offset as a fraction of half the canvas width
-    double y = 0;      // offset as a fraction of half the canvas height
-    double scale = 1;  // 1 = fit inside the canvas
+    double x = 0;         // offset as a fraction of half the canvas width
+    double y = 0;         // offset as a fraction of half the canvas height
+    double scale = 1;     // 1 = fit inside the canvas
+    double rotation = 0;  // degrees, clockwise
+
+    bool operator==(const Transform &) const = default;
+};
+
+// One keyframe of an animated property, in the clip's own time (0 = clip
+// start). `ease` shapes the move from the previous key to this one.
+struct KeyPoint {
+    qint64 t = 0;
+    double v = 0;
+    QString ease = QStringLiteral("ease-in-out");  // linear | ease-in | ease-out | ease-in-out | back | bounce | elastic
+
+    bool operator==(const KeyPoint &) const = default;
+};
+
+// Ready-made movement, the way CapCut and Premiere templates do it: an
+// entrance, an exit and a loop. Names are resolved by the animation engine.
+struct Motion {
+    QString in;                // fade, pop, slide-up/down/left/right, zoom-in, zoom-out, spin, drop, blur-in, typewriter, kinetic
+    qint64 inUs = 500'000;
+    QString out;               // fade, pop, slide-up/down/left/right, zoom-in, zoom-out, spin, blur-out
+    qint64 outUs = 400'000;
+    QString loop;              // pulse, float, shake, wiggle, breathe, spin, ken-burns
+    double loopSpeed = 1.0;    // cycles per second multiplier
+
+    bool isEmpty() const { return in.isEmpty() && out.isEmpty() && loop.isEmpty(); }
+    bool operator==(const Motion &) const = default;
+};
+
+// Transition from the previous main-track clip into this one, centred on the cut.
+struct Transition {
+    QString name;              // crossfade, fade-black, fade-white, push-left/right/up/down, slide-left/right/up/down,
+                               // zoom, whip, spin, glitch, flash, wipe, circle, blur
+    qint64 us = 500'000;
+
+    bool operator==(const Transition &) const = default;
+};
+QStringList transitionNames();
+QStringList speedCurveNames();
+QStringList framingNames();  // auto, fill, fit, fit-blur
+
+// Animatable properties: x, y, scale, rotation, opacity.
+using KeyTracks = QMap<QString, QList<KeyPoint>>;
+
+// A named GPU effect or look. `amount` is strength (1 = the preset's
+// designed look; some adjustments take -1..1). `path` is for LUT files.
+struct Effect {
+    QString name;
+    double amount = 1.0;
+    QString path;
+
+    bool operator==(const Effect &) const = default;
 };
 
 struct Segment {
@@ -71,6 +128,19 @@ struct Segment {
     double opacity = 1.0;
     Transform transform;
     TextStyle text;          // used when the material is the text material
+    Motion motion;
+    KeyTracks keys;
+    QList<Effect> effects;   // on a clip: applied to it; on an adjustment layer: to everything beneath
+    Transition transition;   // main track only: how this clip comes in from the previous one
+    double speed = 1.0;      // average playback speed; 0 = freeze frame at sourceStart
+    QString curve;           // speed ramp: ramp-up, ramp-down, hero, bullet; empty = constant
+    QString framing = QStringLiteral("auto");  // main track: auto (fill, follow the subject), fill, fit, fit-blur
+
+    // Source time shown at `local` (time since the clip started). Handles
+    // speed, ramps and freezes; extrapolates past the edges for transitions.
+    qint64 sourceAt(qint64 local) const;
+    // How much of the source the clip plays.
+    qint64 sourceSpan() const { return qint64(double(duration) * speed); }
 
     qint64 end() const { return start + duration; }
     bool contains(qint64 t) const { return t >= start && t < end(); }
@@ -92,14 +162,17 @@ struct Canvas {
     QString background = QStringLiteral("#000000");  // shows wherever no clip covers the frame
 };
 
-// Applies a named text preset (title, subtitle, caption, lower-third,
-// end-card): style and position. Keeps the text. False for unknown names.
-bool applyTextPreset(const QString &name, TextStyle *style, Transform *transform);
+// Applies a named text preset: style and position, plus its default motion
+// when `motion` is given. Keeps the text. False for unknown names.
+bool applyTextPreset(const QString &name, TextStyle *style, Transform *transform, Motion *motion = nullptr);
+QStringList textPresetNames();
+QStringList textShapeNames();
 
 struct Draft {
     QString name = QStringLiteral("Untitled");
     Canvas canvas;
     bool canvasLocked = false;  // false: follow the first clip's shape
+    QString style;              // ad style the assistant designs with ("energetic", ...); empty = none
     QList<Material> materials;
     QList<Track> tracks;        // tracks[0] is always the main track
 
@@ -112,8 +185,9 @@ struct Draft {
     const Segment *segment(const QString &id, const Track **owner = nullptr) const;
     Track &mainTrack() { return tracks[0]; }
 
-    // Text clips share one built-in material; this adds it on first use.
+    // Text clips and adjustment layers share built-in materials; these add them on first use.
     void ensureTextMaterial();
+    void ensureEffectMaterial();
 
     // Re-establish invariants after an edit: the main track is magnetic
     // (no gaps), other tracks are sorted, and empty extra tracks go away.

@@ -71,8 +71,42 @@ public:
 
     // Inspector edits. commit=false applies live (slider drag) and records
     // one undo step when the matching commit=true call arrives.
-    Q_INVOKABLE void setSegmentProperty(const QString &segmentId, const QString &key, double value, bool commit = true);
+    // `at` is the playhead (timeline time): when the property is keyframed,
+    // the keyframe there is edited (or added) instead of the resting value.
+    Q_INVOKABLE void setSegmentProperty(const QString &segmentId, const QString &key, double value, bool commit = true,
+                                        qint64 at = -1);
     Q_INVOKABLE void resetTransform(const QString &segmentId);
+
+    // Motion presets (slot: in | out | loop; empty name removes) and keyframes.
+    Q_INVOKABLE void setMotion(const QString &segmentId, const QString &slot, const QString &name, double seconds = 0);
+    Q_INVOKABLE QStringList motionNames(const QString &slot) const;
+    // Records the clip's current position, scale, rotation and opacity as a
+    // keyframe at timeline time `t`.
+    Q_INVOKABLE void addKeyframe(const QString &segmentId, qint64 t);
+    Q_INVOKABLE void clearKeyframes(const QString &segmentId);
+
+    // GPU effects on a clip, and effect moments (adjustment layers that
+    // affect everything beneath them for a while).
+    Q_INVOKABLE void addEffect(const QString &segmentId, const QString &name, double amount = 1.0);
+    Q_INVOKABLE void removeEffect(const QString &segmentId, int index);
+    Q_INVOKABLE void setEffectAmount(const QString &segmentId, int index, double amount, bool commit = true);
+    Q_INVOKABLE QString addEffectLayer(const QString &name, qint64 at, qint64 duration = 0);
+    Q_INVOKABLE QStringList effectNames() const;
+    Q_INVOKABLE QStringList momentNames() const;
+
+    // Transition into a main-track clip from the one before it (empty name removes).
+    Q_INVOKABLE void setTransition(const QString &segmentId, const QString &name, double seconds = 0);
+    // Main track: how a clip of another shape fills the frame (auto, fill, fit, fit-blur).
+    Q_INVOKABLE void setFraming(const QString &segmentId, const QString &framing);
+    Q_INVOKABLE QStringList framingNames() const;
+    Q_INVOKABLE QStringList transitionNames() const;
+
+    // Speed keeps the clip's source footage and changes its length (faster =
+    // shorter). curve: "" | ramp-up | ramp-down | hero | bullet.
+    Q_INVOKABLE void setSpeed(const QString &segmentId, double speed, const QString &curve = {});
+    Q_INVOKABLE QStringList speedCurves() const;
+    // Holds the main-track frame at timeline time `t` for `seconds`.
+    Q_INVOKABLE bool freezeFrame(qint64 t, double seconds = 2.0);
 
     // Text clips. Presets: title, subtitle, caption, lower-third, end-card.
     Q_INVOKABLE QString addText(const QString &text, qint64 at = 0, qint64 duration = 0,
@@ -81,6 +115,7 @@ public:
                                      bool commit = true);
     Q_INVOKABLE void applyTextPreset(const QString &segmentId, const QString &preset);
     Q_INVOKABLE QStringList textPresets() const;
+    Q_INVOKABLE QStringList textShapes() const;
     Q_INVOKABLE void setAspect(const QString &aspect);
 
     // Replaces the whole timeline in one undoable edit (used by the assistant).
