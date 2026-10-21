@@ -20,6 +20,9 @@
 #include <QSet>
 #include <QSettings>
 #include <QUrl>
+#include <QTimer>
+#include <QElapsedTimer>
+#include <QCoreApplication>
 #include <QUuid>
 #include <cmath>
 
@@ -196,6 +199,7 @@ Agent::Agent(Project *project, Exporter *exporter, QObject *parent)
     , m_project(project)
     , m_exporter(exporter)
     , m_tools(new EditorTools(project, exporter, this))
+    , m_indexer(new MediaIndexer(this))
     , m_chat(new ChatModel(this))
     , m_net(new QNetworkAccessManager(this))
 {
@@ -220,6 +224,12 @@ Agent::Agent(Project *project, Exporter *exporter, QObject *parent)
         else m_chat->setState(row, r.cancelled ? "cancelled" : "failed", r.error);
     });
     connect(gen, &Generators::finished, this, [this] { m_genRows.clear(); });
+    // Watch imported media for the scene index; pause it while answering.
+    connect(m_project, &Project::changed, this, [this] { QTimer::singleShot(0, this, [this] { m_indexer->watch(m_project->draft()); }); });
+    connect(this, &Agent::busyChanged, this, [this] { m_indexer->setPaused(m_busy); });
+    connect(m_indexer, &MediaIndexer::statusChanged, this, &Agent::mediaStatusChanged);
+    connect(m_indexer, &MediaIndexer::indexed, m_project, &Project::mediaInfoChanged);
+    m_indexer->watch(m_project->draft());
 }
 
 Agent::~Agent() = default;
@@ -418,6 +428,20 @@ void Agent::ensureProvider()
         connect(m_provider, &ChatProvider::jsonFinished, this, &Agent::onPlan);
     }
     m_provider->setProfile(m_profile, apiKeyFor(m_profile));
+}
+
+QString Agent::mediaStatus() const
+{
+    return m_indexer->status();
+}
+
+bool Agent::waitForMedia(int timeoutMs)
+{
+    m_indexer->watch(m_project->draft());
+    QElapsedTimer timer;
+    timer.start();
+    while (m_indexer->busy() && timer.elapsed() < timeoutMs) QCoreApplication::processEvents(QEventLoop::WaitForMoreEvents, 100);
+    return !m_indexer->busy();
 }
 
 QVariantMap Agent::brand() const
@@ -688,9 +712,12 @@ void Agent::buildPlan(const QJsonObject &modelPlan, QJsonObject plan, QStringLis
         plan.insert("background", bg);
         notes << QStringLiteral("set the background to %1").arg(bg);
     }
+    notes += resolveShots(current, index, &plan);  // "shot": 2 / "moment": "the dog" -> exact ranges
+    notes += applyNamedShots(m_request, current, index, &plan);
     const double wanted = requestedLength(m_request);
     if (wanted > 0 && fitToLength(wanted, current, index, &plan))
         notes << QStringLiteral("fitted the clips to %1 seconds").arg(wanted);
+    notes += pickBestMoments(m_request, current, index, &plan);
     if (addAdMusic(m_request, currentPlan, current, index, &plan)) notes << QStringLiteral("added music under the ad");
     if (duckUnderVoiceover(m_request, current, index, &plan)) notes << QStringLiteral("the music dips while the voiceover speaks");
     if (snapEndTexts(m_request, currentPlan, &plan)) notes << QStringLiteral("moved the end text to finish with the video");
@@ -928,5 +955,6 @@ QString Agent::planFeedback(const QJsonObject &current, const QJsonObject &plan,
             problems << QStringLiteral("The user asked for music: put the audio file (type audio in MEDIA) in \"audio\".");
     }
     problems += missingFeatures(m_request, plan);
+    problems += missingShots(m_request, plan, d, index);
     return problems.join('\n');
 }

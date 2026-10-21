@@ -59,6 +59,7 @@ private:
     ToolResult renderPreview(const ToolCall &call) const;
     void applyPlan(const ToolCall &call, const std::function<void(ToolResult)> &done);
     ToolResult findMedia(const ToolCall &call) const;
+    ToolResult findMoments(const ToolCall &call) const;
     ToolResult importMedia(const ToolCall &call);
     void generateMedia(const ToolCall &call, const std::function<void(ToolResult)> &done);
     void applyAndExport(const ToolCall &call, const QStringList &notes, const std::function<void(ToolResult)> &done);

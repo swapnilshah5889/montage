@@ -105,6 +105,7 @@ ApplicationWindow {
                         TabButton {
                             id: tab
                             required property string modelData
+                            objectName: "tab" + modelData
                             text: modelData
                             focusPolicy: Qt.NoFocus
                             contentItem: Label {

@@ -14,6 +14,15 @@ f -f lavfi -i "mandelbrot=size=1280x720:rate=30" -f lavfi -i "sine=frequency=550
   -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$out/forest.mp4"
 f -f lavfi -i "sine=frequency=330:duration=60" -c:a libmp3lame "$out/song.mp3"
 f -f lavfi -i "color=c=0x1fd1c1:size=600x600:duration=1" -frames:v 1 "$out/logo.png"
+# Four shots, cut every 3 s, for the scene index: sharp and steady, blurred,
+# shaky (jittering crop), and a clean gradient.
+f -f lavfi -i "testsrc2=size=1280x720:rate=30:duration=3" \
+  -f lavfi -i "mandelbrot=size=1280x720:rate=30" \
+  -f lavfi -i "smptehdbars=size=1360x800:rate=30:duration=3" \
+  -f lavfi -i "gradients=size=1280x720:rate=30:duration=3:speed=0.02" \
+  -f lavfi -i "sine=frequency=500:duration=12" \
+  -filter_complex "[1]trim=duration=3,boxblur=18[blur];[2]crop=1280:720:'40+38*sin(n*1.9)':'40+38*cos(n*2.7)'[shake];[0][blur][shake][3]concat=n=4:v=1:a=0,format=yuv420p[v]" \
+  -map "[v]" -map 4:a -c:v libx264 -c:a aac -shortest "$out/shots.mp4"
 # 120 BPM drum loop (kick on every beat, hats in between) for beat sync
 f -f lavfi -i "aevalsrc='0.9*sin(2*PI*55*t)*exp(-25*mod(t,0.5)) + 0.25*(random(0)-0.5)*exp(-60*mod(t+0.25,0.5))':s=44100:d=30" \
   -ac 2 -c:a libmp3lame -q:a 2 "$out/beat.mp3"

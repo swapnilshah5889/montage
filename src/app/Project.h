@@ -104,6 +104,8 @@ public:
 
     // Smart edit: cut to the music ("beats", "bars", or "" for off), and
     // captions of what's said (transcribed locally, in the background).
+    // Media details (like the scene index) changed outside an edit.
+    void mediaInfoChanged();
     QString beatSync() const;
     Q_INVOKABLE void setBeatSync(const QString &mode);
     bool captioning() const { return m_captioning; }

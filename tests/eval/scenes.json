@@ -1,0 +1,177 @@
+{
+  "about": "Media understanding eval: the scene index (shots, quality, descriptions from a local vision model). shots.mp4 has four 3 s shots: a sharp test pattern, a blurred fractal, shaky colour bars and a flat green gradient. Needs tests/make_media.sh and a vision model in Ollama (qwen3-vl:8b-instruct). Run: Montage --eval tests/eval/scenes.json --media tests/media --profile <id>",
+  "cases": [
+    {
+      "name": "best-part",
+      "media": [
+        "shots.mp4"
+      ],
+      "requests": [
+        "Make a 3 second video from the best part of the clip"
+      ],
+      "checks": [
+        {
+          "type": "main_within",
+          "media": "shots.mp4",
+          "ranges": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        {
+          "type": "length",
+          "min": 2.9,
+          "max": 3.1
+        }
+      ]
+    },
+    {
+      "name": "color-bars",
+      "media": [
+        "shots.mp4",
+        "beach.mp4"
+      ],
+      "requests": [
+        "Make a 3 second video using only the color bars"
+      ],
+      "checks": [
+        {
+          "type": "main_within",
+          "media": "shots.mp4",
+          "ranges": [
+            [
+              6,
+              9
+            ]
+          ]
+        },
+        {
+          "type": "media_not_used",
+          "media": "beach.mp4"
+        },
+        {
+          "type": "length",
+          "min": 2.9,
+          "max": 3.1
+        }
+      ]
+    },
+    {
+      "name": "green-gradient",
+      "media": [
+        "shots.mp4"
+      ],
+      "requests": [
+        "Make a 4 second intro on the green gradient shot with the title \"Welcome\""
+      ],
+      "checks": [
+        {
+          "type": "main_within",
+          "media": "shots.mp4",
+          "ranges": [
+            [
+              9,
+              12
+            ]
+          ]
+        },
+        {
+          "type": "text",
+          "contains": "Welcome"
+        },
+        {
+          "type": "length",
+          "min": 3.9,
+          "max": 4.1
+        }
+      ]
+    },
+    {
+      "name": "best-of-each",
+      "media": [
+        "shots.mp4",
+        "forest.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 3,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 2
+          }
+        ]
+      },
+      "requests": [
+        "Use the best 2 seconds of each clip instead"
+      ],
+      "checks": [
+        {
+          "type": "main_within",
+          "media": "shots.mp4",
+          "ranges": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        },
+        {
+          "type": "length",
+          "min": 3.9,
+          "max": 4.1
+        }
+      ]
+    },
+    {
+      "name": "skip-blurry",
+      "media": [
+        "shots.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 3,
+            "to": 6
+          }
+        ]
+      },
+      "requests": [
+        "That part is blurry, swap it for a sharp one"
+      ],
+      "checks": [
+        {
+          "type": "main_within",
+          "media": "shots.mp4",
+          "ranges": [
+            [
+              0,
+              3
+            ],
+            [
+              6,
+              9
+            ]
+          ]
+        },
+        {
+          "type": "length",
+          "min": 2.9,
+          "max": 3.1
+        }
+      ]
+    }
+  ]
+}

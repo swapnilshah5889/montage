@@ -270,6 +270,20 @@ QString check(const QJsonObject &c, const Ctx &x)
                     return {};
         return name + QStringLiteral(" doesn't move");
     }
+    if (type == QLatin1String("main_within")) {  // every main clip of this media lies inside one of `ranges` (seconds in the file)
+        const QString name = c.value("media").toString();
+        int seen = 0;
+        for (const Segment &s : x.d.tracks[0].segments) {
+            if (mediaName(x.d, s) != name) continue;
+            ++seen;
+            const double a = s.sourceStart / 1e6, b = (s.sourceStart + s.sourceSpan()) / 1e6;
+            bool inside = false;
+            for (const QJsonValue &r : c.value("ranges").toArray())
+                inside |= a >= r.toArray().at(0).toDouble() - 0.15 && b <= r.toArray().at(1).toDouble() + 0.15;
+            if (!inside) return QStringLiteral("%1 uses %2-%3s").arg(name).arg(a, 0, 'f', 2).arg(b, 0, 'f', 2);
+        }
+        return seen ? QString() : QStringLiteral("%1 isn't in the main track").arg(name);
+    }
     if (type == QLatin1String("beat_sync")) {
         const QString want = c.value("value").toString();
         return x.d.beatSync == want ? QString() : QStringLiteral("beat_sync is \"%1\"").arg(x.d.beatSync);
@@ -370,6 +384,10 @@ int runEval(Agent &agent, Project &project, const QString &casesFile, const QStr
             if (!report.ok()) out(QStringLiteral("  setup errors: ") + report.errors.join("; "));
             project.applyDraft(d);
         }
+
+        // Let the scene index finish watching the media first (cached after the first run),
+        // so every run sees the same shots.
+        if (!agent.waitForMedia(600'000)) out(QStringLiteral("  (media index still building)"));
 
         out(QStringLiteral("== %1").arg(name));
         double caseSecs = 0;

@@ -39,6 +39,7 @@ QString agentSystemPrompt(bool vision)
 How the editor works
 - The whole timeline is described by an edit plan (JSON, times in seconds, media ids like "m1"). apply_plan replaces the timeline with the plan you pass, so to change anything you take the current plan, modify it, and pass the complete result.
 - main: clips that play back to back with no gaps; "from"/"to" are seconds inside the file. For photos, "to" is how long to show it.
+- The media list includes each video's shots from the scene index: what each shows, framing, people, and which are blurry, shaky or the best. Choose footage by what it shows. A main or overlay item can name a shot instead of exact seconds - "shot": 2 (the second shot of that file) or "moment": "dog running" - and the app sets "from"/"to" to the sharpest, steadiest stretch of the item's length (from/to then only give the length). find_moments searches every file's shots by description.
 - overlays: pictures shown on top (picture-in-picture) from timeline time "at", with a named position and a scale (0.4 = 40% of the screen).
 - audio: music or sound starting at timeline time "at". Volume 1 is normal; 0.25-0.4 sits music under speech.
 - texts: on-screen text with a style: title (big, centred), subtitle, caption (bottom, on a dark box), lower-third (name/role label), end-card. Optional color (#RRGGBB), position, size (fraction of screen height).
@@ -130,6 +131,15 @@ QString guidedSystemPrompt()
         QJsonObject{{"kind", "voiceover"}, {"text", "Baked fresh every morning."}, {"voice", "af_heart"}, {"as", "g2"}},
         QJsonObject{{"kind", "music"}, {"prompt", "cheerful acoustic guitar and light percussion, warm"}, {"seconds", 8}, {"as", "g3"}}});
 
+    const QString mediaShots = QStringLiteral(
+        "m1  video  trip.mp4  20s  1920x1080  sound\n"
+        "    shots: 1) 0-6s people hiking up a rocky trail (wide, best); 2) 6-12s boots on the path (close-up, blurry); "
+        "3) 12-20s friends around a campfire at night (medium, 3 people)");
+    QJsonObject hike = clip("m1", 0, 3), fire = clip("m1", 0, 3);
+    hike.insert("shot", 1);
+    fire.insert("shot", 3);
+    const QJsonObject shotsPlan = plan("Made a 6 second video: the hike, then the campfire.", "keep", {hike, fire}, {}, {}, {});
+
     return QStringLiteral(R"(You are the planning engine inside Montage, a video editor. You read the user's request and answer with ONE JSON object: the edit plan. The plan describes the WHOLE video after the change. The app builds the video exactly from your plan.
 
 THE PLAN
@@ -140,6 +150,9 @@ THE PLAN
     RIGHT: {"from":0,"to":5}, {"from":0,"to":5}, {"from":0,"to":5}   (each starts at its own file's 0)
     WRONG: {"from":0,"to":5}, {"from":5,"to":10}, {"from":10,"to":15}
 - The video length is the sum of (to - from) for all "main" clips.
+- MEDIA lists the shots inside each video (what they show; blurry, shaky and best). To use a shot, add "shot": its number,
+  and "from"/"to" then only set the length: {"media": "m1", "shot": 2, "from": 0, "to": 3} uses the best 3 seconds of shot 2.
+  Pick shots by what they show; prefer "best" and avoid "blurry" and "shaky" ones.
 - "audio": music or sound. "at" = when it starts in the video. "from"/"to" = which part of the file. "volume": 1 normal, 0.3 quiet background.
 - "texts": words on screen. "at" = when it appears in the video, "duration" = how long, "style" = title | subtitle | caption | lower-third | end-card,
   or for ads: headline (big bold hook) | badge ("NEW", "30% OFF") | price ("$49") | cta (a button: "Shop now") | kinetic-caption (words pop in one by one).
@@ -250,6 +263,16 @@ REQUEST: make an 8 second ad for my bakery with a picture of fresh bread, a voic
 ANSWER:
 )") + compact(genAd) + QStringLiteral(R"(
 (Nothing in MEDIA fits, so "generate" makes the picture g1, the voiceover g2 and the music g3; "main" and "audio" use them by name. The music sits at 0.25 under the voice.)
+
+EXAMPLE 8 (choosing shots)
+MEDIA:
+)") + mediaShots + QStringLiteral(R"(
+CURRENT PLAN:
+)") + compact(empty) + QStringLiteral(R"(
+REQUEST: make a 6 second video of the hike and the campfire
+ANSWER:
+)") + compact(shotsPlan) + QStringLiteral(R"(
+(Shots chosen by what they show: shot 1 is the hike, shot 3 the campfire; shot 2 is blurry. The app finds the best 3 seconds of each.)
 )");
 }
 

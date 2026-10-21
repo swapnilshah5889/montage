@@ -1,5 +1,7 @@
 #include "PlanGuards.h"
 
+#include "engine/Scenes.h"
+
 #include "Generators.h"
 
 #include <QColor>
@@ -189,6 +191,30 @@ QStringList keepUnrequested(const QString &request, const QJsonObject &current, 
     restore("moments", moments, "the effects");
     restore("style", styled, "the style");
     restore("captions", matches(req, R"(\b(captions?|subtitles?|transcri\w*)\b)"), "the captions");
+    // A speed change nobody asked for (small models sometimes add "speed" to
+    // trim): keep each clip's current speed.
+    if (!matches(req, R"(\b(speed|faster|slower|fast|slow|slow[ -]?mo\w*|time-?lapse|ramp|freeze|hold|[0-9.]+ ?x)\b)")) {
+        QJsonArray items = plan->value("main").toArray();
+        QHash<QString, QJsonValue> currentSpeed;
+        for (const QJsonValue &v : current.value("main").toArray())
+            currentSpeed.insert(v.toObject().value("media").toString(), v.toObject().value("speed"));
+        bool changed = false;
+        for (qsizetype i = 0; i < items.size(); ++i) {
+            QJsonObject o = items[i].toObject();
+            if (!o.contains("speed") && !o.contains("speed_curve")) continue;
+            const QJsonValue before = currentSpeed.value(o.value("media").toString());
+            if (o.value("speed") == before && !o.contains("speed_curve")) continue;
+            if (before.isUndefined()) o.remove("speed");
+            else o.insert("speed", before);
+            o.remove("speed_curve");
+            items[i] = o;
+            changed = true;
+        }
+        if (changed) {
+            plan->insert("main", items);
+            kept << QStringLiteral("the speed");
+        }
+    }
     restore("beat_sync", styled || matches(req, R"(\b(beats?|rhythm|sync|in time|bars?|downbeats?|tempo)\b)"), "the beat sync");
     if (!aspect && plan->value("aspect").toString() != QLatin1String("keep")
         && plan->value("aspect") != current.value("aspect")) {
@@ -278,6 +304,25 @@ bool fitToLength(double want, const Draft &d, const MediaIndex &index, QJsonObje
             // Back to source seconds: timeline length x speed.
             const double sp = clips[i].speed, source = target[i] * sp, fileCap = clips[i].cap * sp;
             double from = clips[i].still ? 0 : clips[i].from;
+            // A clip that sits inside one shot stays in it: if the shot is too short
+            // for the new length, slow it down (to half speed at most) rather than
+            // run into the next shot, the way an editor would.
+            const Material *mat = lookup(o.value("media").toString(), d, index);
+            const SceneIndex shots = mat && mat->kind == MaterialKind::Video && sp == 1 ? cachedSceneIndex(*mat) : SceneIndex{};
+            const double origTo = seconds(o.value("to"));
+            const Shot *home = nullptr;
+            for (const Shot &sh : shots.shots)
+                if (from >= sh.start / 1e6 - 0.05 && !std::isnan(origTo) && origTo <= sh.end / 1e6 + 0.05) home = &sh;
+            if (home && shots.shots.size() > 1 && source > home->length() / 1e6 + 0.05 && home->length() / 1e6 >= 0.5 * source) {
+                const double len = home->length() / 1e6;
+                o.insert("from", round2(home->start / 1e6));
+                o.insert("to", round2(home->end / 1e6));
+                o.insert("speed", round2(len / target[i]));
+                o.remove("duration");
+                main[i] = o;
+                newTotal += target[i];
+                continue;
+            }
             if (from + source > fileCap) from = std::max(0.0, fileCap - source);
             o.insert("from", round2(from));
             o.insert("to", round2(from + source));
@@ -489,6 +534,11 @@ bool snapEndTexts(const QString &request, const QJsonObject &current, QJsonObjec
     if (!(length > 0)) return false;
     QSet<QString> before;
     for (const QJsonValue &v : current.value("texts").toArray()) before << v.toObject().value("text").toString();
+    // "end with a Shop now button": the words after "end with" name the text meant for the end.
+    QStringList named;
+    if (const auto m = QRegularExpression(QStringLiteral(R"(\b(?:end|finish)(?:s|ing)? (?:with|on) (?:an? |the )?([^.,;!?]+))")).match(req); m.hasMatch())
+        for (const QString &w : m.captured(1).split(QLatin1Char(' '), Qt::SkipEmptyParts))
+            if (w.size() >= 3 && !QStringList{"button", "text", "title", "card", "caption", "badge", "and", "the", "with"}.contains(w)) named << w;
     QJsonArray texts = plan->value("texts").toArray();
     bool changed = false;
     for (qsizetype i = 0; i < texts.size(); ++i) {
@@ -497,7 +547,9 @@ bool snapEndTexts(const QString &request, const QJsonObject &current, QJsonObjec
         const double at = seconds(o.value("at")), dur = seconds(o.value("duration"));
         if (std::isnan(at) || std::isnan(dur) || dur <= 0) continue;
         if (std::abs(at + dur - length) < 0.1 || at + dur > length + 0.1) continue;  // already ends with it (or past: fitted later)
-        if (at < length / 2) continue;  // not meant for the end
+        const QString text = o.value("text").toString().toLower();
+        const bool isNamed = !named.isEmpty() && std::all_of(named.cbegin(), named.cend(), [&](const QString &w) { return text.contains(w); });
+        if (at < length / 2 && !isNamed) continue;  // not meant for the end
         const double d = std::min(dur, length);
         o.insert("at", round2(length - d));
         o.insert("duration", round2(d));
@@ -1132,6 +1184,256 @@ QStringList applySmartRequests(const QString &request, const Draft &d, const Med
         }
     }
     return notes;
+}
+
+namespace {
+
+// The shot list of a media reference, building it if needed (fast: no model).
+SceneIndex shotsOf(const Material *m)
+{
+    if (!m || (m->kind != MaterialKind::Video && m->kind != MaterialKind::Image)) return {};
+    return sceneIndex(*m);
+}
+
+double itemLength(const QJsonObject &o, double fallback)
+{
+    const double f = seconds(o.value("from")), t = seconds(o.value("to"));
+    if (!std::isnan(f) && !std::isnan(t) && t - f >= 0.3) return t - f;
+    const double d = seconds(o.value("duration"));
+    return std::isnan(d) || d < 0.3 ? fallback : d;
+}
+
+// Sets from/to to the best stretch of `shot` with `len` seconds (photos: just the length).
+void placeInShot(QJsonObject &o, const Material &m, const Shot &shot, double len)
+{
+    if (m.kind == MaterialKind::Image) {
+        o.insert("from", 0);
+        o.insert("to", round2(len));
+        return;
+    }
+    const qint64 want = qint64(len * 1e6);
+    QPair<qint64, qint64> w = shot.bestWindow(want);
+    if (want > shot.length()) {  // longer than the shot: start at the shot and run on
+        const qint64 from = std::max<qint64>(0, std::min<qint64>(shot.start, m.durationUs - want));
+        w = {from, std::min<qint64>(m.durationUs, from + want)};
+    }
+    o.insert("from", round2(w.first / 1e6));
+    o.insert("to", round2(w.second / 1e6));
+}
+
+}  // namespace
+
+QStringList resolveShots(const Draft &d, const MediaIndex &index, QJsonObject *plan)
+{
+    QStringList notes;
+    for (const char *key : {"main", "overlays"}) {
+        QJsonArray items = plan->value(QLatin1String(key)).toArray();
+        bool changed = false;
+        for (qsizetype i = 0; i < items.size(); ++i) {
+            QJsonObject o = items[i].toObject();
+            if (!o.contains("shot") && !o.contains("moment")) continue;
+            const Material *m = lookup(o.value("media").toString(), d, index);
+            const SceneIndex x = shotsOf(m);
+            int shot = -1;
+            if (o.contains("shot")) {
+                const int n = o.value("shot").toInt(int(seconds(o.value("shot"))));
+                if (n >= 1 && n <= x.shots.size()) shot = n - 1;
+            }
+            if (shot < 0 && o.contains("moment")) {
+                const QList<ShotMatch> found = findShots(x, o.value("moment").toString(), 0.25);
+                if (!found.isEmpty()) shot = found.first().shot;
+            }
+            o.remove("shot");
+            o.remove("moment");
+            if (shot >= 0 && m) {
+                const double len = itemLength(o, std::min(3.0, x.shots[shot].length() > 0 ? x.shots[shot].length() / 1e6 : 3.0));
+                placeInShot(o, *m, x.shots[shot], len);
+                o.remove("duration");
+                notes << QStringLiteral("used shot %1 of %2").arg(shot + 1).arg(m->name);
+            }
+            items[i] = o;
+            changed = true;
+        }
+        if (changed) plan->insert(QLatin1String(key), items);
+    }
+    return notes;
+}
+
+QStringList pickBestMoments(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan)
+{
+    const QString req = request.toLower();
+    if (!matches(req, R"(\b(best|nicest|strongest|coolest|prettiest|most (beautiful|interesting|exciting|dramatic)|highlights?|good (parts|bits|shots|moments)|keepers|skip the (bad|blurry|shaky|boring)|without the (blurry|shaky|bad)|sharp(er)? (one|shot|part|bit|take)|steadier|less shaky|in focus|better (one|shot|part|bit|take)|not (so )?(blurry|shaky))\b)"))
+        return {};
+    QJsonArray main = plan->value("main").toArray();
+    QHash<QString, QList<int>> usedShots;  // per file, so a file used twice gives two different shots
+    int changed = 0;
+    for (qsizetype i = 0; i < main.size(); ++i) {
+        QJsonObject o = main[i].toObject();
+        const Material *m = lookup(o.value("media").toString(), d, index);
+        if (!m || m->kind != MaterialKind::Video) continue;
+        const SceneIndex x = shotsOf(m);
+        if (x.isEmpty()) continue;
+        const double len = itemLength(o, 3);
+        QList<int> &used = usedShots[m->id];
+        int best = -1;
+        double bestValue = -1;
+        for (qsizetype k = 0; k < x.shots.size(); ++k) {
+            const Shot &s = x.shots[k];
+            if (used.contains(int(k)) && used.size() < x.shots.size()) continue;
+            // A shot much shorter than the clip can't hold it: discount it.
+            const double fit = std::min(1.0, (s.length() / 1e6) / std::max(0.3, len));
+            const double value = s.score() * (0.5 + 0.5 * fit);
+            if (value > bestValue) bestValue = value, best = int(k);
+        }
+        if (best < 0) continue;
+        used << best;
+        const double before = seconds(o.value("from"));
+        placeInShot(o, *m, x.shots[best], len);
+        if (std::isnan(before) || std::abs(seconds(o.value("from")) - before) > 0.05) ++changed;
+        main[i] = o;
+    }
+    if (!changed) return {};
+    plan->insert("main", main);
+    return {QStringLiteral("picked the best moments (sharp, steady shots)")};
+}
+
+namespace {
+
+struct ShotCandidate {
+    QString id;  // material
+    int shot;
+    double weight, score;
+};
+
+// Shots that what the request names would point to, strongest first.
+QList<ShotCandidate> namedShots(const QString &request, const Draft &d, const MediaIndex &index)
+{
+    // Words that say what to show, not how to edit.
+    static const QSet<QString> generic{
+        "make", "add", "put", "use", "using", "video", "second", "seconds", "start", "end", "first", "last", "then",
+        "vertical", "horizontal", "square", "music", "song", "title", "text", "caption", "captions", "clip", "clips", "shot",
+        "shots", "part", "parts", "with", "and", "the", "a", "an", "of", "for", "my", "our", "it", "this", "that", "to", "in",
+        "on", "at", "from", "show", "showing", "ad", "reel", "tiktok", "story", "only", "just", "best", "good", "nice", "some",
+        "long", "short", "quick", "fast", "slow", "one", "two", "three", "four", "five", "into", "where", "when", "like", "want",
+        "need", "please", "can", "you", "me", "is", "are", "be", "do", "does", "around", "about", "after", "before", "same",
+        "also", "intro", "outro", "welcome", "instead", "swap", "replace", "sharp", "blurry", "shaky"};
+    auto stem = [](QString w) {
+        for (const char *suffix : {"ing", "es", "s", "ed"})
+            if (w.size() > 4 && w.endsWith(QLatin1String(suffix))) {
+                w.chop(int(qstrlen(suffix)));
+                break;
+            }
+        return w;
+    };
+    auto tokens = [&](const QString &text) {
+        QSet<QString> out;
+        for (const QString &w : text.toLower().split(QRegularExpression(QStringLiteral("[^a-z0-9]+")), Qt::SkipEmptyParts))
+            if (w.size() >= 3) out << stem(w);
+        return out;
+    };
+    // Quoted words are text for the screen, not footage.
+    QString req = request;
+    req.replace(QRegularExpression(QStringLiteral("[\"“][^\"”]*[\"”]")), QStringLiteral(" "));
+    QStringList want;
+    for (const QString &w : req.toLower().split(QRegularExpression(QStringLiteral("[^a-z0-9]+")), Qt::SkipEmptyParts))
+        if (w.size() >= 3 && !generic.contains(w)) want << stem(w);
+    // Words naming files are about files, which other checks handle.
+    QSet<QString> fileWords;
+    for (const QString &id : index.materialIds()) fileWords += tokens(QFileInfo(d.material(id)->name).completeBaseName());
+    want.removeIf([&](const QString &w) { return fileWords.contains(w); });
+    if (want.isEmpty()) return {};
+
+    QList<ShotCandidate> found;
+    for (const QString &id : index.materialIds()) {
+        const Material *m = d.material(id);
+        const SceneIndex x = cachedSceneIndex(*m);
+        for (qsizetype k = 0; k < x.shots.size(); ++k) {
+            const Shot &s = x.shots[k];
+            const QSet<QString> about = tokens(s.description), subject = tokens(s.subjects.join(' ') + QLatin1Char(' ') + s.tags.join(' '));
+            double weight = 0;
+            for (const QString &w : want) weight += subject.contains(w) ? 1.5 : about.contains(w) ? 1.0 : 0.0;
+            // A subject, two words of the description, or half of what the request names.
+            if (weight >= 1.5 || (weight >= 1.0 && weight >= 0.5 * want.size())) found.append({id, int(k), weight, s.score()});
+        }
+    }
+    if (qEnvironmentVariableIsSet("MONTAGE_DEBUG")) {
+        QStringList f;
+        for (const ShotCandidate &c : found) f << QStringLiteral("%1#%2=%3").arg(c.id).arg(c.shot + 1).arg(c.weight);
+        qInfo("missingShots: want [%s] found [%s]", qPrintable(want.join(',')), qPrintable(f.join(' ')));
+    }
+    std::sort(found.begin(), found.end(), [](const ShotCandidate &a, const ShotCandidate &b) {
+        return a.weight != b.weight ? a.weight > b.weight : a.score > b.score;
+    });
+    return found;
+}
+
+// Whether the plan uses a main or overlay item inside this shot.
+bool planUsesShot(const QJsonObject &plan, const ShotCandidate &c, const Draft &d, const MediaIndex &index)
+{
+    const Material *m = d.material(c.id);
+    const Shot s = cachedSceneIndex(*m).shots.value(c.shot);
+    for (const char *key : {"main", "overlays"})
+        for (const QJsonValue &v : plan.value(QLatin1String(key)).toArray()) {
+            const QJsonObject o = v.toObject();
+            if (lookup(o.value("media").toString(), d, index) != m) continue;
+            if (o.contains("shot") && o.value("shot").toInt() == c.shot + 1) return true;
+            const double f = seconds(o.value("from")), t = seconds(o.value("to"));
+            if (m->kind == MaterialKind::Image || (!std::isnan(f) && !std::isnan(t) && std::min(t, s.end / 1e6) - std::max(f, s.start / 1e6) > 0.3))
+                return true;
+        }
+    return false;
+}
+
+}  // namespace
+
+QStringList missingShots(const QString &request, const QJsonObject &plan, const Draft &d, const MediaIndex &index)
+{
+    const QList<ShotCandidate> found = namedShots(request, d, index);
+    if (found.isEmpty()) return {};
+    const ShotCandidate best = found.first();
+    // Fine if the plan uses this shot, or another that matches as well.
+    for (const ShotCandidate &c : found)
+        if (c.weight >= best.weight - 1e-9 && planUsesShot(plan, c, d, index)) return {};
+    const Shot s = cachedSceneIndex(*d.material(best.id)).shots.value(best.shot);
+    return {QStringLiteral("The request asks for footage your plan doesn't use: %1 shot %2 (%3-%4s, \"%5\"). Add {\"media\": \"%1\", \"shot\": %2} to \"main\".")
+                .arg(index.alias(best.id))
+                .arg(best.shot + 1)
+                .arg(round2(s.start / 1e6))
+                .arg(round2(s.end / 1e6))
+                .arg(s.description.isEmpty() ? s.tags.mid(0, 3).join(", ") : s.description)};
+}
+
+QStringList applyNamedShots(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan)
+{
+    const QList<ShotCandidate> found = namedShots(request, d, index);
+    if (found.isEmpty()) return {};
+    const ShotCandidate best = found.first();
+    // Only a clear winner: twice as strong as the next, and naming two things or a subject.
+    if (best.weight < 2 || (found.size() > 1 && found[1].weight * 1.5 > best.weight)) return {};
+    if (planUsesShot(*plan, best, d, index)) return {};
+    const Material *m = d.material(best.id);
+    const SceneIndex x = cachedSceneIndex(*m);
+    // Replace the item of that file that matches the request least.
+    QJsonArray main = plan->value("main").toArray();
+    int target = -1;
+    double weakest = 1e9;
+    for (qsizetype i = 0; i < main.size(); ++i) {
+        const QJsonObject o = main[i].toObject();
+        if (lookup(o.value("media").toString(), d, index) != m) continue;
+        const double f = seconds(o.value("from"));
+        double w = 0;
+        for (const ShotCandidate &c : found)
+            if (c.id == best.id && !std::isnan(f) && f >= x.shots.value(c.shot).start / 1e6 - 0.05 && f < x.shots.value(c.shot).end / 1e6) w = std::max(w, c.weight);
+        if (w < weakest) weakest = w, target = int(i);
+    }
+    if (target < 0) return {};
+    QJsonObject o = main[target].toObject();
+    placeInShot(o, *m, x.shots[best.shot], itemLength(o, std::min(3.0, x.shots[best.shot].length() / 1e6)));
+    main[target] = o;
+    plan->insert("main", main);
+    return {QStringLiteral("used shot %1 of %2 (%3)").arg(best.shot + 1).arg(m->name, x.shots[best.shot].description.isEmpty()
+                                                                                          ? x.shots[best.shot].tags.mid(0, 2).join(", ")
+                                                                                          : x.shots[best.shot].description)};
 }
 
 }  // namespace mtg::ai

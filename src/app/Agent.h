@@ -2,6 +2,7 @@
 
 #include "model/Draft.h"
 #include "ai/ChatProvider.h"
+#include "ai/MediaIndexer.h"
 
 #include <QAbstractListModel>
 #include <QJsonObject>
@@ -65,6 +66,7 @@ class Agent : public QObject
     Q_PROPERTY(QString profileId READ profileId WRITE setProfileId NOTIFY profileChanged)
     Q_PROPERTY(QVariantMap profile READ profileMap NOTIFY profileChanged)
     Q_PROPERTY(QVariantMap brand READ brand WRITE setBrand NOTIFY brandChanged)
+    Q_PROPERTY(QString mediaStatus READ mediaStatus NOTIFY mediaStatusChanged)
 
 public:
     Agent(Project *project, Exporter *exporter, QObject *parent);
@@ -80,6 +82,11 @@ public:
     void setProfileId(const QString &id);
     QVariantMap profileMap() const;
     QVariantMap brand() const;
+    // "Watching your clips (2 of 5)" while the scene index is being built.
+    QString mediaStatus() const;
+    // Blocks (running the event loop) until every imported clip is indexed,
+    // or `timeoutMs` passes. For scripted runs and evals.
+    bool waitForMedia(int timeoutMs);
     void setBrand(const QVariantMap &brand);
     Q_INVOKABLE QStringList adStyles() const;
 
@@ -101,6 +108,7 @@ signals:
     void profilesChanged();
     void profileChanged();
     void brandChanged();
+    void mediaStatusChanged();
     void modelsFetched(const QString &id, const QStringList &models, const QString &error);
     void finished(bool ok, const QString &reply);
 
@@ -131,6 +139,7 @@ private:
     Project *m_project;
     Exporter *m_exporter;
     mtg::ai::EditorTools *m_tools;
+    mtg::ai::MediaIndexer *m_indexer;
     ChatModel *m_chat;
     QNetworkAccessManager *m_net;
     mtg::ai::ChatProvider *m_provider = nullptr;
