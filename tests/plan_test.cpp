@@ -5,6 +5,7 @@
 
 #include "ai/AdStyles.h"
 #include "ai/Brand.h"
+#include "engine/Scenes.h"
 #include "engine/Speech.h"
 #include "ai/Finishing.h"
 #include "ai/ChatProvider.h"
@@ -801,9 +802,19 @@ static void styleTests()
     cta.insert("texts", QJsonArray{QJsonObject{{"text", "Shop now"}, {"at", 6}, {"duration", 2}, {"style", "cta"}}});
     CHECK(snapEndTexts("Add a Shop now button at the end", twoClips, &cta));
     CHECK(cta.value("texts").toArray()[0].toObject().value("at").toDouble() == 8);
+    QJsonObject named = twoClips;  // named after "end with", wherever the model put it
+    named.insert("texts", QJsonArray{QJsonObject{{"text", "Shop now"}, {"at", 2}, {"duration", 3}, {"style", "cta"}}});
+    CHECK(snapEndTexts("Make an ad and end with a Shop now button", twoClips, &named));
+    CHECK(named.value("texts").toArray()[0].toObject().value("at").toDouble() == 7);
     QJsonObject early = twoClips;
     early.insert("texts", QJsonArray{QJsonObject{{"text", "Hi"}, {"at", 0}, {"duration", 2}}});
     CHECK(!snapEndTexts("add Hi at the start and end with a fade", twoClips, &early));
+
+    // Speed nobody asked for is dropped.
+    QJsonObject fast = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 4, "speed": 2}]})").object();
+    keepUnrequested("use the best 2 seconds of each clip", QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 4}]})").object(),
+                    styled, MediaIndex(styled), &fast);
+    CHECK(!fast.value("main").toArray()[0].toObject().contains("speed"));
 
     // The guards keep a style the request didn't ask to change.
     QJsonObject keep = round;
@@ -1245,6 +1256,74 @@ static void smartTests()
     CHECK(chunks.size() == 2 && chunks[0].size() == 4 && chunks[1].first().text == "Order");
 }
 
+static void sceneTests()
+{
+    Draft d = sampleDraft();  // m1 beach 12s, m2 city 8s, m3 song, m4 logo
+    d.materials[0].path = "/nowhere/beach.mp4";
+    const MediaIndex index(d);
+    auto shot = [](double a, double b, const char *what, double sharp, double steady, QStringList subjects = {}) {
+        Shot s;
+        s.start = qint64(a * 1e6);
+        s.end = qint64(b * 1e6);
+        s.description = what;
+        s.sharpness = sharp;
+        s.stability = steady;
+        s.exposure = 1;
+        s.subjects = subjects;
+        s.framing = "wide";
+        for (double t = a; t < b - 1e-9; t += 0.2) s.quality << float(sharp * steady * (t > a + 1 && t < a + 2.6 ? 1.0 : 0.6));
+        return s;
+    };
+    SceneIndex x;
+    x.shots = {shot(0, 4, "waves breaking on a sandy beach", 0.9, 0.9), shot(4, 8, "dog running along the shore", 0.8, 0.85, {"dog"}),
+               shot(8, 12, "blurry close-up of sand", 0.1, 0.9)};
+    x.described = true;
+    putSceneIndex(d.materials[0], x);
+
+    const QString media = describeMedia(d, index);
+    CHECK(media.contains("shots: 1) 0-4s waves breaking on a sandy beach (wide, best)"));
+    CHECK(media.contains("3) 8-12s blurry close-up of sand (wide, blurry)"));
+
+    // "shot" and "moment" become exact ranges inside the shot, keeping the length.
+    QJsonObject plan = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "shot": 2, "from": 0, "to": 2},
+        {"media": "m1", "moment": "the dog on the beach", "from": 0, "to": 3}]})").object();
+    CHECK(resolveShots(d, index, &plan).size() == 2);
+    const QJsonArray m = plan.value("main").toArray();
+    CHECK(m[0].toObject().value("from").toDouble() >= 4 && m[0].toObject().value("to").toDouble() <= 8);
+    CHECK(std::abs(m[0].toObject().value("to").toDouble() - m[0].toObject().value("from").toDouble() - 2) < 0.01);
+    CHECK(m[1].toObject().value("from").toDouble() >= 4 && !m[1].toObject().contains("moment"));
+
+    // "The best parts" avoid the blurry shot, and a file used twice gets two different shots.
+    QJsonObject best = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 8, "to": 10}, {"media": "m1", "from": 9, "to": 11}]})").object();
+    CHECK(!pickBestMoments("use the best bits of the beach clip", d, index, &best).isEmpty());
+    const QJsonArray b = best.value("main").toArray();
+    CHECK(b[0].toObject().value("to").toDouble() <= 8.01 && b[1].toObject().value("to").toDouble() <= 8.01);
+    CHECK(std::abs(b[0].toObject().value("from").toDouble() - b[1].toObject().value("from").toDouble()) >= 2);
+    CHECK(pickBestMoments("make it vertical", d, index, &best).isEmpty());
+
+    // Content the request names but the plan skips.
+    const QJsonObject wavesOnly = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 3}]})").object();
+    const QStringList miss = missingShots("make a video with the dog", wavesOnly, d, index);
+    CHECK(miss.size() == 1 && miss[0].contains("\"shot\": 2"));
+    // Partial words don't count ("sand" isn't "sandy"), and a plan using an equally good match is fine.
+    CHECK(missingShots("show the sand", wavesOnly, d, index).size() == 1);  // "sand" is in shot 3's description
+    CHECK(missingShots("show the sandwich", wavesOnly, d, index).isEmpty());
+    CHECK(missingShots("make a vertical video with music", wavesOnly, d, index).isEmpty());
+
+    // A clearly named shot replaces the weaker one the model chose, keeping its length.
+    QJsonObject swap = wavesOnly;
+    CHECK(applyNamedShots("start with the dog running along the shore", d, index, &swap).size() == 1);
+    CHECK(swap.value("main").toArray()[0].toObject().value("from").toDouble() >= 4);
+    CHECK(std::abs(swap.value("main").toArray()[0].toObject().value("to").toDouble() - swap.value("main").toArray()[0].toObject().value("from").toDouble() - 3) < 0.01);
+    QJsonObject vague = wavesOnly;
+    CHECK(applyNamedShots("make it nicer", d, index, &vague).isEmpty());
+
+    // Matching words to shots.
+    const QList<ShotMatch> dogs = findShots(x, "dogs running");
+    CHECK(!dogs.isEmpty() && dogs.first().shot == 1);
+    CHECK(x.shots[0].bestWindow(1'000'000).first >= 1'000'000);  // inside the best-quality stretch
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -1254,6 +1333,7 @@ int main(int argc, char **argv)
     styleTests();
     brandTests();
     smartTests();
+    sceneTests();
     generationTests();
     anthropicTests();
     openAiTests();

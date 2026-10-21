@@ -53,6 +53,26 @@ QStringList applyObviousFeatures(const QString &request, const Draft &d, const M
 // effect). Returns a note per change.
 QStringList applySmartRequests(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan);
 
+// Scene-index references: main and overlay items with "shot": N (1-based, in
+// that file's shot list) or "moment": "words" get "from"/"to" set to the
+// best stretch of that shot, keeping the item's length (else up to 3 s).
+// Returns a note per item resolved.
+QStringList resolveShots(const Draft &d, const MediaIndex &index, QJsonObject *plan);
+
+// "The best parts", "highlights", "the best 3 seconds of each clip": every
+// main video item gets the sharpest, steadiest, most appealing stretch of
+// its length in its file (different shots when a file is used twice).
+QStringList pickBestMoments(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan);
+
+// When the request clearly names what's in one shot ("the color bars") and
+// the plan uses a weaker shot of that file, the strong match takes that
+// item's place (same length). Returns a note when it swaps.
+QStringList applyNamedShots(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan);
+
+// Shots the request names by what's in them ("the dog", "where she
+// laughs") that the plan doesn't use, as instructions with the shot to add.
+QStringList missingShots(const QString &request, const QJsonObject &plan, const Draft &d, const MediaIndex &index);
+
 // Shapes to export when the request asks for several platforms at once
 // ("export it for TikTok and YouTube", "all formats"); empty otherwise.
 QStringList requestedFormats(const QString &request);

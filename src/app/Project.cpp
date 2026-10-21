@@ -1,6 +1,7 @@
 #include "Project.h"
 
 #include "engine/Beats.h"
+#include "engine/Scenes.h"
 #include "engine/Speech.h"
 
 #include "engine/Animation.h"
@@ -236,6 +237,16 @@ QVariantList Project::materials() const
             {"hasAudio", m.hasAudio},
             {"thumbnail", m.thumbnail.isEmpty() ? QString() : QUrl::fromLocalFile(m.thumbnail).toString()},
             {"used", used.contains(m.id)},
+            {"shots", [&] {
+                 // The scene index, when it's been built: shot count and the best shot's description.
+                 const SceneIndex x = cachedSceneIndex(m);
+                 return QVariantMap{{"count", int(x.shots.size())}, {"described", x.described},
+                                    {"summary", x.shots.isEmpty() ? QString() : [&] {
+                                         const Shot *best = &x.shots.first();
+                                         for (const Shot &s : x.shots) if (s.score() > best->score()) best = &s;
+                                         return best->description.isEmpty() ? best->tags.mid(0, 3).join(", ") : best->description;
+                                     }()}};
+             }()},
         });
     }
     return out;
@@ -823,6 +834,11 @@ void Project::setFraming(const QString &segmentId, const QString &framing)
         s->framing = framing;
         return true;
     });
+}
+
+void Project::mediaInfoChanged()
+{
+    emit changed();  // the media list shows scene-index info
 }
 
 QString Project::beatSync() const

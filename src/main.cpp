@@ -4,17 +4,20 @@
 #include "app/Player.h"
 #include "app/Project.h"
 #include "engine/Beats.h"
+#include "engine/Scenes.h"
 #include "engine/ExportJob.h"
 #include "engine/MediaProbe.h"
 #include "engine/Renderer.h"
 #include "ai/EditPlan.h"
 #include "ai/Finishing.h"
+#include "ai/MediaIndexer.h"
 #include "ai/Generators.h"
 
 #include <QCommandLineParser>
 #include <QEventLoop>
 #include <QJsonArray>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -84,10 +87,12 @@ int main(int argc, char *argv[])
     const QCommandLineOption frameOpt("frame", "Render one frame at <seconds> to --frame-out, then quit.", "seconds");
     const QCommandLineOption frameOutOpt("frame-out", "PNG path for --frame.", "png");
     const QCommandLineOption planOpt("plan", "Apply an edit plan (JSON) to the project; its \"generate\" items are made first.", "plan.json");
+    const QCommandLineOption scenesOpt("scenes", "Print the scene index (shots, quality, labels) of a video or photo, then quit.", "file");
+    const QCommandLineOption describeOpt("describe", "With --scenes: also describe each shot with the local vision model.");
     const QCommandLineOption beatsOpt("beats", "Print the beat grid of an audio or video file, then quit.", "file");
     const QCommandLineOption formatsOpt("formats", "With --export: one file per shape, e.g. 9:16,1:1,16:9.", "shapes");
     const QCommandLineOption openUiOpt("ui-open", "Open popups / check controls by objectName (comma-separated) once the window is up.", "names");
-    cli.addOptions({typeOpt, waitOpt, quitOpt, frameOpt, frameOutOpt, planOpt, openUiOpt, formatsOpt, beatsOpt});
+    cli.addOptions({typeOpt, waitOpt, quitOpt, frameOpt, frameOutOpt, planOpt, openUiOpt, formatsOpt, beatsOpt, scenesOpt, describeOpt});
     cli.addOptions({openOpt, importOpt, overlayOpt, saveOpt, exportOpt, shotOpt, seekOpt, selectOpt, playOpt, textOpt,
                     profileOpt, agentOpt, evalOpt, mediaOpt, onlyOpt});
     cli.process(app);
@@ -96,6 +101,35 @@ int main(int argc, char *argv[])
     Player player(&project);
     Exporter exporter(&project);
     Agent agent(&project, &exporter, &app);
+    if (cli.isSet(scenesOpt)) {
+        mtg::Material m;
+        QString err;
+        if (!mtg::probeMedia(QFileInfo(cli.value(scenesOpt)).absoluteFilePath(), QDir::tempPath(), &m, &err)) {
+            std::fprintf(stderr, "%s\n", qPrintable(err));
+            return 1;
+        }
+        QElapsedTimer timer;
+        timer.start();
+        mtg::SceneIndex x = mtg::sceneIndex(m);
+        if (cli.isSet(describeOpt)) {
+            mtg::ai::MediaIndexer indexer;
+            mtg::Draft d;
+            d.materials << m;
+            indexer.watch(d);
+            while (indexer.busy()) QCoreApplication::processEvents(QEventLoop::WaitForMoreEvents, 100);
+            x = mtg::cachedSceneIndex(m);
+        }
+        std::printf("%d shot(s) in %.1fs\n", int(x.shots.size()), timer.elapsed() / 1000.0);
+        for (qsizetype i = 0; i < x.shots.size(); ++i) {
+            const mtg::Shot &s = x.shots[i];
+            const auto best = s.bestWindow(2'000'000);
+            std::printf("[%d] %.2f-%.2fs sharp %.2f steady %.2f exposure %.2f motion %.2f faces %d score %.2f best2s %.2f-%.2f tags: %s%s\n",
+                        int(i + 1), s.start / 1e6, s.end / 1e6, s.sharpness, s.stability, s.exposure, s.motion, s.faces, s.score(),
+                        best.first / 1e6, best.second / 1e6, qPrintable(s.tags.join(", ")),
+                        s.description.isEmpty() ? "" : qPrintable(QStringLiteral(" | \"%1\" %2 appeal %3").arg(s.description, s.framing).arg(s.appeal)));
+        }
+        return x.isEmpty() ? 1 : 0;
+    }
     if (cli.isSet(beatsOpt)) {
         mtg::Material m;
         QString err;

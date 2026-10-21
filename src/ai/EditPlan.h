@@ -43,7 +43,11 @@ struct PlanReport {
     QString text() const;
 };
 
-// One line per media file: id, kind, name, length, size, sound.
+// The scene index of a file as one indented line ("    shots: 1) 0-3s waves
+// on a beach (wide, best); 2) ..."), or empty when it hasn't been built.
+QString describeShots(const Material &m);
+
+// One line per media file: id, kind, name, length, size, sound, plus its shots.
 QString describeMedia(const Draft &d, const MediaIndex &index);
 
 // Compact human-readable timeline summary (what the model gets back after an edit).

@@ -4,6 +4,7 @@
 #include "Generators.h"
 #include "engine/Animation.h"
 #include "engine/Beats.h"
+#include "engine/Scenes.h"
 #include "engine/Effects.h"
 
 #include <QColor>
@@ -213,6 +214,41 @@ double seconds(const QJsonValue &v)
 
 // ---------------------------------------------------------------- describe
 
+QString describeShots(const Material &m)
+{
+    const SceneIndex x = cachedSceneIndex(m);
+    if (x.isEmpty()) return {};
+    auto what = [](const Shot &s) {
+        QString w = s.description;
+        if (w.isEmpty()) w = s.tags.mid(0, 3).join(", ");
+        if (w.endsWith(QLatin1Char('.'))) w.chop(1);
+        return w.isEmpty() ? QStringLiteral("(not described yet)") : w;
+    };
+    auto notes = [](const Shot &s, bool best) {
+        QStringList n;
+        if (!s.framing.isEmpty()) n << s.framing;
+        if (s.faces == 1) n << QStringLiteral("1 person");
+        else if (s.faces > 1) n << QStringLiteral("%1 people").arg(s.faces);
+        if (s.sharpness < 0.3) n << QStringLiteral("blurry");
+        if (s.stability < 0.4) n << QStringLiteral("shaky");
+        if (s.exposure < 0.5) n << QStringLiteral("badly lit");
+        if (best) n << QStringLiteral("best");
+        return n.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(n.join(", "));
+    };
+    int bestShot = 0;
+    for (qsizetype i = 1; i < x.shots.size(); ++i)
+        if (x.shots[i].score() > x.shots[bestShot].score()) bestShot = int(i);
+    if (x.shots.size() == 1 || m.kind == MaterialKind::Image)
+        return QStringLiteral("    shows: %1%2").arg(what(x.shots.first()), notes(x.shots.first(), false));
+    QStringList parts;
+    for (qsizetype i = 0; i < x.shots.size() && i < 10; ++i) {
+        const Shot &s = x.shots[i];
+        parts << QStringLiteral("%1) %2-%3s %4%5").arg(i + 1).arg(fmt(secs(s.start)), fmt(secs(s.end)), what(s), notes(s, i == bestShot));
+    }
+    if (x.shots.size() > 10) parts << QStringLiteral("(+%1 more shots)").arg(x.shots.size() - 10);
+    return QStringLiteral("    shots: ") + parts.join(QStringLiteral("; "));
+}
+
 QString describeMedia(const Draft &d, const MediaIndex &index)
 {
     QStringList lines;
@@ -223,6 +259,7 @@ QString describeMedia(const Draft &d, const MediaIndex &index)
         if (m->width > 0) line += QStringLiteral("  %1x%2").arg(m->width).arg(m->height);
         if (m->kind == MaterialKind::Video) line += m->hasAudio ? QStringLiteral("  sound") : QStringLiteral("  no-sound");
         lines << line;
+        if (const QString shots = describeShots(*m); !shots.isEmpty()) lines << shots;
     }
     return lines.isEmpty() ? QStringLiteral("(no media imported yet)") : lines.join('\n');
 }
@@ -975,9 +1012,11 @@ QJsonObject planSchema()
                                            {"opacity", number()}, {"scale", number()}, {"x", number()}, {"y", number()},
                                            {"transition", choice(transitionNames() << "none")}, {"transition_duration", number()},
                                            {"framing", choice(framingNames())}, {"speech", QJsonObject{{"type", "boolean"}}},
+                                           {"shot", QJsonObject{{"type", "integer"}}}, {"moment", string()},
                                            {"speed", number()}, {"speed_curve", choice(speedCurveNames())}, {"duration", number()}}),
                                  {"media", "from", "to"});
     const QJsonObject overlay = obj(animated({{"media", string()}, {"at", number()}, {"from", number()}, {"to", number()},
+                                              {"shot", QJsonObject{{"type", "integer"}}}, {"moment", string()},
                                               {"speed", number()}, {"speed_curve", choice(speedCurveNames())}, {"duration", number()},
                                               {"position", choice(kOverlayPositions)}, {"scale", number()}, {"x", number()},
                                               {"y", number()}, {"volume", number()}, {"opacity", number()}}),

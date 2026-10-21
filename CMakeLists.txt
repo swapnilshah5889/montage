@@ -30,6 +30,7 @@ add_library(montage_engine STATIC
     src/engine/Reframe.h src/engine/Reframe.mm
     src/engine/Beats.h src/engine/Beats.cpp
     src/engine/Speech.h src/engine/Speech.cpp
+    src/engine/Scenes.h src/engine/Scenes.mm
     src/engine/Renderer.h src/engine/Renderer.cpp
     src/engine/PreviewEngine.h src/engine/PreviewEngine.cpp
     src/engine/ExportJob.h src/engine/ExportJob.cpp
@@ -37,7 +38,7 @@ add_library(montage_engine STATIC
 target_include_directories(montage_engine PUBLIC src ${FFMPEG_INCLUDE_DIR})
 target_link_libraries(montage_engine PUBLIC Qt6::Core Qt6::Gui Qt6::Multimedia ${FFMPEG_LIBRARIES}
     "-framework CoreImage" "-framework Metal" "-framework Foundation" "-framework CoreGraphics" "-framework Vision" "-framework CoreVideo")
-set_source_files_properties(src/engine/Effects.mm src/engine/Reframe.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+set_source_files_properties(src/engine/Effects.mm src/engine/Reframe.mm src/engine/Scenes.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 # AI layer: model-agnostic chat providers, edit plans, prompts.
 add_library(montage_ai STATIC
@@ -48,6 +49,7 @@ add_library(montage_ai STATIC
     src/ai/AdStyles.h src/ai/AdStyles.cpp
     src/ai/Brand.h src/ai/Brand.cpp
     src/ai/Finishing.h src/ai/Finishing.cpp
+    src/ai/MediaIndexer.h src/ai/MediaIndexer.cpp
     src/ai/Prompts.h src/ai/Prompts.cpp
     src/ai/Generators.h src/ai/Generators.cpp
 )

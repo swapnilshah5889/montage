@@ -3,6 +3,7 @@
 #include "AdStyles.h"
 #include "Brand.h"
 #include "Finishing.h"
+#include "engine/Scenes.h"
 #include "EditPlan.h"
 #include "Generators.h"
 #include "PlanGuards.h"
@@ -147,6 +148,12 @@ QList<ToolSpec> EditorTools::specs(bool vision) const
                    {"times"})};
     }
     out << ToolSpec{
+        "find_moments",
+        "Searches the scene index of every imported video and photo for shots matching a description (\"dog running on "
+        "the beach\", \"close-up of the product\", \"people laughing\") and returns each match with its file, shot "
+        "number, time range, description and quality. Use it to find footage by what it shows.",
+        schema({{"query", QJsonObject{{"type", "string"}}}}, {"query"})};
+    out << ToolSpec{
         "find_media",
         "Lists video, audio and image files in a folder (and its direct subfolders). Call this when the user mentions "
         "a folder or asks what files they have. Accepts ~ for the home folder.",
@@ -239,6 +246,8 @@ void EditorTools::run(const ToolCall &call, bool vision, const std::function<voi
         done(lookAtMedia(call));
     } else if (n == QLatin1String("render_preview") && vision) {
         done(renderPreview(call));
+    } else if (n == QLatin1String("find_moments")) {
+        done(findMoments(call));
     } else if (n == QLatin1String("find_media")) {
         done(findMedia(call));
     } else if (n == QLatin1String("import_media")) {
@@ -333,7 +342,9 @@ void EditorTools::applyPlan(const ToolCall &call, const std::function<void(ToolR
     const Draft &current = m_project->draft();
     const MediaIndex index(current);
     const QJsonObject before = planFromDraft(current, index);
-    QStringList styled = applySmartRequests(m_request, current, index, &plan);
+    QStringList styled = resolveShots(current, index, &plan);
+    styled += pickBestMoments(m_request, current, index, &plan);
+    styled += applySmartRequests(m_request, current, index, &plan);
     styled += applyBrand(m_request, loadBrandKit(), before, current, index, &plan);
     styled += applyAdStyle(before, current, index, &plan);
     PlanReport report;
@@ -370,6 +381,39 @@ void EditorTools::finishAsync(const Draft &draft, const std::function<void(const
         worker->deleteLater();
     });
     worker->start();
+}
+
+ToolResult EditorTools::findMoments(const ToolCall &call) const
+{
+    const QString query = call.input.value("query").toString().trimmed();
+    if (query.isEmpty()) return error(call, QStringLiteral("Give a query describing the shot."));
+    const Draft &d = m_project->draft();
+    const MediaIndex index(d);
+    QStringList lines;
+    int unindexed = 0;
+    for (const QString &id : index.materialIds()) {
+        const Material *m = d.material(id);
+        if (m->kind != MaterialKind::Video && m->kind != MaterialKind::Image) continue;
+        const SceneIndex x = cachedSceneIndex(*m);
+        if (x.isEmpty()) {
+            ++unindexed;
+            continue;
+        }
+        for (const ShotMatch &hit : findShots(x, query, 0.25)) {
+            const Shot &s = x.shots[hit.shot];
+            lines << QStringLiteral("%1 shot %2: %3-%4s \"%5\" (%6, quality %7, match %8)")
+                         .arg(index.alias(id))
+                         .arg(hit.shot + 1)
+                         .arg(s.start / 1e6, 0, 'f', 1)
+                         .arg(s.end / 1e6, 0, 'f', 1)
+                         .arg(s.description.isEmpty() ? s.tags.join(", ") : s.description, s.framing.isEmpty() ? QStringLiteral("-") : s.framing)
+                         .arg(s.score(), 0, 'f', 2)
+                         .arg(hit.match, 0, 'f', 2);
+        }
+    }
+    QString text = lines.isEmpty() ? QStringLiteral("No shots match \"%1\".").arg(query) : lines.mid(0, 12).join('\n');
+    if (unindexed) text += QStringLiteral("\n(%1 file(s) still being indexed.)").arg(unindexed);
+    return ToolResult{call.id, call.name, text};
 }
 
 ToolResult EditorTools::lookAtMedia(const ToolCall &call) const

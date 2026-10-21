@@ -54,6 +54,20 @@ DeepSeek, OpenRouter, or local models through Ollama or LM Studio.
 
   Try: *Make a 10 second ad for my candle shop with a cozy background image, a voiceover
   saying "Light up your evenings" and soft music.*
+- **Media understanding** (`src/engine/Scenes.*`, `src/ai/MediaIndexer.*`): every imported video
+  and photo gets a scene index in the background. Cuts are found from colour-histogram jumps;
+  each shot is measured for sharpness, exposure, camera shake and faces, labelled by Apple's
+  on-device image classifier, and then described by a local vision model (qwen3-vl through
+  Ollama, about ten seconds a shot; the non-thinking `qwen3-vl:8b-instruct` build is preferred).
+  The model sees each file's shots in the media list ("2) 3-6s blurred fractal (close-up,
+  blurry)"), so it chooses footage by what it shows. Plans can name a shot instead of seconds
+  (`"shot": 2` or `"moment": "dog running"`) and the app picks the sharpest, steadiest stretch
+  of the right length. "The best parts" / "highlights" / "a sharper one" requests are applied
+  directly. When a request names what's in a shot ("the color bars, then the forest"), the
+  app uses that shot even if the model picked another one of the same file; weaker matches
+  are pointed out to the model instead. A clip that has to run longer than its shot is
+  slowed slightly rather than spilling into the next shot. Agent mode has a `find_moments` tool. Indexes are cached per file; work pauses
+  while the assistant answers. The media panel shows progress and shot counts.
 - **Smart edit** (`src/engine/Beats.*`, `Speech.*`, `src/ai/Finishing.*`): the app does the
   parts that need the media itself after a plan is built, off the UI thread.
   - *Cut to the beat* (`"beat_sync": "beats" | "bars"`): a beat tracker (spectral-flux onsets
@@ -109,6 +123,7 @@ qwen2.5:7b on Ollama (Apple Silicon), guided mode:
 | `tests/eval/ads.json` (ads and effects, tuning set) | 10/10 | 8/10, 4/10 (before the feature guards) | 7-80 s |
 | `tests/eval/ads-holdout.json` (5 cases, never tuned against) | 5/5 | - | 10-70 s |
 | `tests/eval/generate.json` (generated image, voiceover, music; skipped when a backend is down) | 2/2 | - | 10-130 s (first run), 10-20 s cached |
+| `tests/eval/scenes.json` (choosing shots: best part, by content, skip blurry) | 5/5 | - | - |
 | `tests/eval/smart.json` (beat sync, captions, ducking, background removal) | 5/5 | 4/5 (before the background-colour fix) | 7-50 s |
 
 Both hold-out sets were written before tuning against them, but each was later read to
@@ -159,6 +174,8 @@ server; agent mode hasn't been scored against a live hosted model yet.
 - Speed: constant speed, freeze frames, speed ramps (ramp up/down, hero, bullet) with time-remapped audio
 - MP4 export (H.264 + AAC) at canvas resolution, or every platform at once (9:16, 4:5, 1:1,
   16:9), each re-laid-out and reframed
+- Scene index: shots, quality (sharp, steady, exposure, faces), on-device labels and local
+  vision-model descriptions for every clip; shot counts in the media panel
 - Smart edit: cut to the beat (beat ticks on music clips), auto captions from speech
   (whisper.cpp, local), music that dips while someone talks, background removal (Vision)
 
@@ -203,8 +220,9 @@ build/Montage.app/Contents/MacOS/Montage --import a.mp4 --import b.mov --import 
 `--open <project>`, `--seek <seconds>`, `--play`, `--select-first`, `--text <preset>:<text>` and
 `--screenshot <png>` (render the window to a PNG, then quit) are also available. `--plan <json>`
 applies an edit plan (making its `"generate"` media first), `--frame <seconds> --frame-out <png>` renders one frame, and
-`--formats 9:16,1:1,16:9` with `--export` writes one file per shape, and `--beats <file>`
-prints a file's tempo, beats, bars and accents. `MONTAGE_BRAND_JSON`
+`--formats 9:16,1:1,16:9` with `--export` writes one file per shape, `--beats <file>`
+prints a file's tempo, beats, bars and accents, and `--scenes <file>` prints its scene index
+(add `--describe` to have the vision model describe each shot). `MONTAGE_BRAND_JSON`
 overrides the saved brand kit for a scripted run.
 
 Talk to the assistant without the UI (`--profile` picks the model):
@@ -254,6 +272,7 @@ build/plan_test
 | `src/ai/PlanGuards.*`, `AdStyles.*`, `Brand.*` | Deterministic guards, ad style designer, brand kit | - |
 | `src/ai/Generators.*`, `scripts/generate/` | Generated images, voiceovers and music (ComfyUI, Kokoro, ACE-Step) | - |
 | `src/engine/Animation.*`, `Effects.mm`, `Reframe.mm` | Motions and keyframes, Core Image effects and cutout, Auto Reframe (Vision) | VE effect / animation modules |
+| `src/engine/Scenes.*`, `src/ai/MediaIndexer.*` | Scene index: shots, quality, Vision labels, vision-model descriptions | CapCut's smart scene / highlight features |
 | `src/engine/Beats.*`, `Speech.*`, `src/ai/Finishing.*` | Beat tracking and cut-to-the-beat, speech spans and ducking, whisper.cpp captions | CapCut's beat / auto-caption features |
 | `src/app/Agent.*` | Agent loop, guided planner, chat transcript, model profiles | - |
 | `qml/` | UI: chat, media, player, inspector, timeline | `TimeLine`, `Player`, `MaterialPanel`, `FunctionPanel` QML modules |
@@ -267,8 +286,8 @@ build/plan_test
 - Not built yet: audio waveforms, proxies, generated video clips, cutting by transcript
   (text-based editing).
 - Auto Reframe analyses a clip the first time it is drawn (a fraction of a second per clip).
-- Assistant: guided mode sees media only through names and lengths unless the model can read
-  images (qwen3-vl:8b is installed and worth trying as a vision model).
+- The scene index describes one frame per shot (the best stretch's middle), so action inside a
+  long shot isn't described beat by beat; a 20-minute file takes a few minutes to describe.
 - The background-removal mask is computed per frame (fine for stills and short clips; long
   videos preview slowly with it on).
 - Shipping: build an LGPL-only FFmpeg and link it dynamically, run `macdeployqt`, then sign and notarize.

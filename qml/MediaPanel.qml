@@ -27,6 +27,14 @@ Rectangle {
             Item { Layout.fillWidth: true }
             FlatButton { text: "+ Import"; accent: true; tip: "Import media (⌘I)"; onClicked: panel.importRequested() }
         }
+        Label {
+            Layout.fillWidth: true
+            visible: Agent.mediaStatus !== ""
+            text: "◔ " + Agent.mediaStatus
+            color: Theme.textDim
+            font.pixelSize: 11
+            elide: Text.ElideRight
+        }
 
         GridView {
             id: grid
@@ -101,6 +109,17 @@ Rectangle {
                             width: 7; height: 7; radius: 4
                             color: Theme.accent
                         }
+                        Label {  // shots found by the scene index
+                            anchors.left: parent.left
+                            anchors.bottom: parent.bottom
+                            anchors.margins: 5
+                            visible: !!cell.modelData.shots && cell.modelData.shots.count > 1
+                            text: cell.modelData.shots ? cell.modelData.shots.count + " shots" : ""
+                            font.pixelSize: 10
+                            color: "white"
+                            leftPadding: 4; rightPadding: 4; topPadding: 1; bottomPadding: 1
+                            background: Rectangle { color: "#b0000000"; radius: 3 }
+                        }
                         Label {
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
@@ -135,6 +154,9 @@ Rectangle {
                         elide: Text.ElideMiddle
                         color: Theme.textDim
                         font.pixelSize: 11
+                        ToolTip.visible: nameHover.hovered && !!cell.modelData.shots && cell.modelData.shots.summary !== ""
+                        ToolTip.text: cell.modelData.shots ? (cell.modelData.shots.count > 1 ? cell.modelData.shots.count + " shots · best: " : "") + cell.modelData.shots.summary : ""
+                        HoverHandler { id: nameHover }
                     }
                 }
             }

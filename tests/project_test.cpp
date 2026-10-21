@@ -4,6 +4,7 @@
 #include "app/Project.h"
 #include "engine/Beats.h"
 #include "engine/MediaProbe.h"
+#include "engine/Scenes.h"
 #include "engine/Speech.h"
 
 #include <QCoreApplication>
@@ -34,6 +35,29 @@ static QList<qint64> starts(const Track &t)
     QList<qint64> out;
     for (const Segment &s : t.segments) out << s.start;
     return out;
+}
+
+// The scene index on shots.mp4: four shots cut every 3 s - sharp and
+// steady, blurred, shaky, and a flat gradient.
+static void sceneTests(const QDir &media)
+{
+    Material m;
+    QString err;
+    if (!probeMedia(media.filePath("shots.mp4"), QDir::tempPath(), &m, &err)) {
+        std::fprintf(stderr, "skipping scene tests: %s (run tests/make_media.sh)\n", qPrintable(err));
+        return;
+    }
+    const SceneIndex x = sceneIndex(m);
+    CHECK(x.shots.size() == 4);
+    if (x.shots.size() != 4) return;
+    for (int i = 1; i < 4; ++i) CHECK(std::abs(x.shots[i].start - i * 3'000'000) <= 200'000);
+    CHECK(x.shots[0].sharpness > 0.5 && x.shots[0].stability > 0.7);
+    CHECK(x.shots[1].sharpness < 0.3);  // blurred
+    CHECK(x.shots[2].stability < 0.4);  // shaky
+    CHECK(x.shots[0].score() > x.shots[1].score() && x.shots[0].score() > x.shots[2].score());
+    const auto w = x.shots[0].bestWindow(2'000'000);
+    CHECK(w.first >= 0 && w.second <= 3'000'000 && w.second - w.first == 2'000'000);
+    CHECK(cachedSceneIndex(m).shots.size() == 4);  // cached
 }
 
 // Beat sync, ducking and captions on real audio (beat.mp3 is a 120 BPM loop,
@@ -318,6 +342,7 @@ int main(int argc, char **argv)
     CHECK(p.selectedId().isEmpty());
 
     smartTests(media);
+    sceneTests(media);
 
     std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "all project tests passed", failures,
                 failures == 1 ? "" : "s");
