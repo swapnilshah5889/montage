@@ -3,11 +3,18 @@
 #include "app/Exporter.h"
 #include "app/Player.h"
 #include "app/Project.h"
+#include "engine/Beats.h"
 #include "engine/ExportJob.h"
+#include "engine/MediaProbe.h"
 #include "engine/Renderer.h"
 #include "ai/EditPlan.h"
+#include "ai/Finishing.h"
+#include "ai/Generators.h"
 
 #include <QCommandLineParser>
+#include <QEventLoop>
+#include <QJsonArray>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -76,10 +83,11 @@ int main(int argc, char *argv[])
     const QCommandLineOption quitOpt("quit", "Quit after loading, importing and saving (no window).");
     const QCommandLineOption frameOpt("frame", "Render one frame at <seconds> to --frame-out, then quit.", "seconds");
     const QCommandLineOption frameOutOpt("frame-out", "PNG path for --frame.", "png");
-    const QCommandLineOption planOpt("plan", "Apply an edit plan (JSON) to the project.", "plan.json");
+    const QCommandLineOption planOpt("plan", "Apply an edit plan (JSON) to the project; its \"generate\" items are made first.", "plan.json");
+    const QCommandLineOption beatsOpt("beats", "Print the beat grid of an audio or video file, then quit.", "file");
     const QCommandLineOption formatsOpt("formats", "With --export: one file per shape, e.g. 9:16,1:1,16:9.", "shapes");
     const QCommandLineOption openUiOpt("ui-open", "Open popups / check controls by objectName (comma-separated) once the window is up.", "names");
-    cli.addOptions({typeOpt, waitOpt, quitOpt, frameOpt, frameOutOpt, planOpt, openUiOpt, formatsOpt});
+    cli.addOptions({typeOpt, waitOpt, quitOpt, frameOpt, frameOutOpt, planOpt, openUiOpt, formatsOpt, beatsOpt});
     cli.addOptions({openOpt, importOpt, overlayOpt, saveOpt, exportOpt, shotOpt, seekOpt, selectOpt, playOpt, textOpt,
                     profileOpt, agentOpt, evalOpt, mediaOpt, onlyOpt});
     cli.process(app);
@@ -88,6 +96,22 @@ int main(int argc, char *argv[])
     Player player(&project);
     Exporter exporter(&project);
     Agent agent(&project, &exporter, &app);
+    if (cli.isSet(beatsOpt)) {
+        mtg::Material m;
+        QString err;
+        if (!mtg::probeMedia(QFileInfo(cli.value(beatsOpt)).absoluteFilePath(), QDir::tempPath(), &m, &err)) {
+            std::fprintf(stderr, "%s\n", qPrintable(err));
+            return 1;
+        }
+        const mtg::BeatGrid g = mtg::beatGrid(m);
+        QStringList beats, bars, accents;
+        for (double b : g.beats) beats << QString::number(b, 'f', 2);
+        for (double b : g.downbeats) bars << QString::number(b, 'f', 2);
+        for (double b : g.accents) accents << QString::number(b, 'f', 2);
+        std::printf("bpm %.1f\nbeats %s\nbars %s\naccents %s\n", g.bpm, qPrintable(beats.join(' ')), qPrintable(bars.join(' ')),
+                    qPrintable(accents.join(' ')));
+        return g.isEmpty() ? 1 : 0;
+    }
     if (cli.isSet(profileOpt)) agent.setProfileId(cli.value(profileOpt));
 
     QObject::connect(&project, &Project::message, [](const QString &m) { std::fprintf(stderr, "%s\n", qPrintable(m)); });
@@ -110,11 +134,37 @@ int main(int argc, char *argv[])
             std::fprintf(stderr, "cannot read %s\n", qPrintable(cli.value(planOpt)));
             return 2;
         }
+        QJsonObject plan = QJsonDocument::fromJson(f.readAll()).object();
+        if (!plan.value("generate").toArray().isEmpty()) {  // make the media it asks for first
+            mtg::ai::Generators generators;
+            QObject::connect(&generators, &mtg::ai::Generators::itemProgress, [](int i, double p, const QString &note) {
+                std::fprintf(stderr, "\rgenerate %d: %3d%% %-40s", i + 1, int(p * 100), qPrintable(note.left(40)));
+            });
+            QEventLoop loop;
+            generators.resolve(plan, project.draft(),
+                               [&](const QStringList &paths) -> const mtg::Draft & {
+                                   QList<QUrl> urls;
+                                   for (const QString &p : paths) urls << QUrl::fromLocalFile(p);
+                                   project.importFiles(urls);
+                                   return project.draft();
+                               },
+                               [&](const mtg::ai::GenResolution &r) {
+                                   std::fprintf(stderr, "\n");
+                                   for (const QString &e : r.errors) std::fprintf(stderr, "%s\n", qPrintable(e));
+                                   plan = r.plan;
+                                   loop.quit();
+                               });
+            loop.exec();
+        }
         mtg::ai::PlanReport report;
-        const mtg::Draft next = mtg::ai::draftFromPlan(project.draft(), QJsonDocument::fromJson(f.readAll()).object(),
-                                                       mtg::ai::MediaIndex(project.draft()), &report);
+        mtg::Draft next = mtg::ai::draftFromPlan(project.draft(), plan, mtg::ai::MediaIndex(project.draft()), &report);
         if (!report.text().isEmpty()) std::fprintf(stderr, "%s\n", qPrintable(report.text()));
         if (!report.ok()) return 1;
+        if (mtg::ai::needsFinishing(next)) {  // beat sync, captions
+            QStringList problems;
+            const QStringList notes = mtg::ai::finishDraft(next, &problems);
+            for (const QString &n : notes + problems) std::fprintf(stderr, "%s\n", qPrintable(n));
+        }
         project.applyDraft(next);
     }
     if (cli.isSet(saveOpt)) project.save(QUrl::fromLocalFile(QFileInfo(cli.value(saveOpt)).absoluteFilePath()));

@@ -1,7 +1,10 @@
 #include "PlanGuards.h"
 
+#include "Generators.h"
+
 #include <QColor>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QSet>
 #include <QRegularExpression>
@@ -61,9 +64,13 @@ QString requestedBackground(const QString &request)
     static const QRegularExpression re(
         QStringLiteral(R"(((?:dark|light|deep|bright|pale)\s+)?([a-z]+)\s+(?:background|backdrop|bg)\b)"),
         QRegularExpression::CaseInsensitiveOption);
-    const auto m = re.match(request);
-    if (!m.hasMatch()) return {};
-    return parseColor(m.captured(1) + m.captured(2));
+    // "remove the background and put it on a white background": the first
+    // "<word> background" that is a colour.
+    for (auto it = re.globalMatch(request); it.hasNext();) {
+        const auto m = it.next();
+        if (const QString c = parseColor(m.captured(1) + m.captured(2)); !c.isEmpty()) return c;
+    }
+    return {};
 }
 
 double requestedLength(const QString &request)
@@ -124,7 +131,12 @@ void keepClipsRestyle(const QJsonArray &currentMain, QJsonObject *plan, QStringL
 QStringList keepUnrequested(const QString &request, const QJsonObject &current, const Draft &d, const MediaIndex &index,
                             QJsonObject *plan)
 {
-    const QString req = request.toLower();
+    // Quoted words are text for the screen, not instructions ('a caption "Look at this"' isn't about looks).
+    QString req = request.toLower();
+    req.replace(QRegularExpression(QStringLiteral("[\"\u201C][^\"\u201D]*[\"\u201D]")), QStringLiteral("\"\""));
+    // Removing a clip's background styles the clip; it doesn't remove clips.
+    static const QRegularExpression bgRemoval(QStringLiteral(R"(\b(remove|erase|drop|get rid of|cut out|delete|lose) (the |its |their |his |her )?(back ?ground|backdrop)\b)"));
+    req.replace(bgRemoval, QStringLiteral("cutout"));
     if (matches(req, R"(\b(start over|from scratch|new video|reset|clear (it|everything|the timeline)|redo it|completely)\b)"))
         return {};
 
@@ -150,7 +162,7 @@ QStringList keepUnrequested(const QString &request, const QJsonObject &current, 
                             || matches(req, R"(\b(order|swap|reorder|shorter|longer|shorten|lengthen|trim|cut (out|it|them|the|that)|remove|delete|drop|replace|length|duration|start(s)? with|end(s)? with|then|all (the |my |of )?(clips|videos|shots|photos|pictures|images)|both|only|just|best|highlights?|montage|reel|tiktok|shorts|story|slideshow|use|make (a|an|me)|create|new|start over|add (the|my|a|an|another|more) (clip|video|shot|photo|picture|image)s?|more (clips|shots)|fewer|instead|move|seconds?|secs?)\b)");
     const bool aspect = matches(req, R"(\b(vertical|horizontal|portrait|landscape|square|tiktok|reels?|shorts|instagram|youtube|story|stories|aspect|ratio|format|widescreen|feed)\b|9:16|16:9|1:1|4:5|4:3|3:4|21:9)");
     const bool audio = namesAudio || (styled && current.value("audio").toArray().isEmpty())
-                       || matches(req, R"(\b(music|songs?|audio|sounds?|track|volume|mute|unmute|quiet|quieter|louder|soundtrack|beats?|voice|silent|silence)\b)");
+                       || matches(req, R"(\b(music|songs?|audio|sounds?|track|volume|mute|unmute|quiet|quieter|louder|soundtrack|beats?|voice|voice-?overs?|narrat\w*|silent|silence|jingle)\b)");
     const bool texts = request.contains(QLatin1Char('"')) || request.contains(QChar(0x201C)) || looks
                        || request.contains(QLatin1Char('$')) || request.contains(QLatin1Char('%'))
                        || matches(req, R"(\b(titles?|texts?|captions?|subtitles?|labels?|lower[ -]third|end[ -]card|says|say|saying|write|written|words?|fonts?|colou?rs?|red|blue|green|yellow|white|black|heading|name|intro|outro|card|quote|bigger|smaller|buttons?|cta|call to action|prices?|badges?|sale|off|discount|offer|deal|tag|headline|hook|shop|buy|order now|sign up|subscribe|code|brand)\b)");
@@ -176,6 +188,8 @@ QStringList keepUnrequested(const QString &request, const QJsonObject &current, 
     restore("background", background, "the background");
     restore("moments", moments, "the effects");
     restore("style", styled, "the style");
+    restore("captions", matches(req, R"(\b(captions?|subtitles?|transcri\w*)\b)"), "the captions");
+    restore("beat_sync", styled || matches(req, R"(\b(beats?|rhythm|sync|in time|bars?|downbeats?|tempo)\b)"), "the beat sync");
     if (!aspect && plan->value("aspect").toString() != QLatin1String("keep")
         && plan->value("aspect") != current.value("aspect")) {
         plan->insert("aspect", QStringLiteral("keep"));
@@ -331,11 +345,18 @@ bool addAdMusic(const QString &request, const QJsonObject &current, const Draft 
 {
     const QString req = request.toLower();
     if (plan->value("style").toString().isEmpty() || !current.value("style").toString().isEmpty()) return false;
-    if (!plan->value("audio").toArray().isEmpty() || !current.value("audio").toArray().isEmpty()) return false;
-    if (matches(req, R"(\b(no|without|silent|mute|muted|quiet|voice ?over|voiceover|narration)\b)")) return false;
+    // A voiceover isn't music: an ad with one still gets music under it.
+    auto hasMusic = [&](const QJsonArray &audio) {
+        for (const QJsonValue &v : audio)
+            if (const Material *m = lookup(v.toObject().value("media").toString(), d, index); !m || !isVoiceover(*m)) return true;
+        return false;
+    };
+    if (hasMusic(plan->value("audio").toArray()) || hasMusic(current.value("audio").toArray())) return false;
+    if (matches(req, R"(\b(no|without|silent|mute|muted|quiet)\b)")) return false;
     const Material *song = nullptr;
     for (const QString &id : index.materialIds())
-        if (const Material *m = d.material(id); m->kind == MaterialKind::Audio && (!song || m->durationUs > song->durationUs)) song = m;
+        if (const Material *m = d.material(id); m->kind == MaterialKind::Audio && !isVoiceover(*m) && (!song || m->durationUs > song->durationUs))
+            song = m;
     if (!song) return false;
     double length = 0;
     for (double l : itemLengths(plan->value("main").toArray())) length += l;
@@ -345,8 +366,9 @@ bool addAdMusic(const QString &request, const QJsonObject &current, const Draft 
     }
     if (!(length > 0)) return false;
     const double to = std::min(length, song->durationUs / 1e6);
-    plan->insert("audio", QJsonArray{QJsonObject{{"media", index.alias(song->id)}, {"at", 0}, {"from", 0},
-                                                 {"to", round2(to)}, {"volume", 0.8}}});
+    QJsonArray audio = plan->value("audio").toArray();
+    audio.prepend(QJsonObject{{"media", index.alias(song->id)}, {"at", 0}, {"from", 0}, {"to", round2(to)}, {"volume", 0.8}});
+    plan->insert("audio", audio);
     return true;
 }
 
@@ -568,6 +590,547 @@ QStringList applyObviousFeatures(const QString &request, const Draft &d, const M
         }
     }
     if (changed) plan->insert("main", main);
+
+    // A hit on a named cut: "a flash when the second clip starts", "shake on every cut".
+    static const struct {
+        const char *pattern, *name;
+        double seconds;
+    } hits[] = {
+        {R"(\bflash(es)?\b)", "flash", 0.3},
+        {R"(\b(zoom[ -]?punch(es)?|punch[ -]?ins?)\b)", "zoom-punch", 0.35},
+        {R"(\b(shake|shakes|shaking)\b)", "shake", 0.5},
+        {R"(\bwhite[ -]?outs?\b)", "white-out", 0.4},
+        {R"(\b(rgb[ -]?split|chromatic)\b)", "rgb-split", 0.35},
+        {R"(\bglitch(es)?\b)", "glitch", 0.35},
+    };
+    QList<double> cuts;
+    {
+        double cursor = 0;
+        const QList<double> lengths = itemLengths(plan->value("main").toArray());
+        for (qsizetype i = 0; i + 1 < lengths.size(); ++i) cuts << round2(cursor += lengths[i]);
+    }
+    static const QRegularExpression nthClip(QStringLiteral(
+        R"(\b(?:when|as|where) the (second|2nd|third|3rd|fourth|4th|fifth|5th|next|last|final) (?:clip|shot|scene|video|photo|picture)s? (?:starts?|begins?|comes? in|comes? on|appears?|kicks? in)\b)"));
+    const bool everyCut = matches(req, R"(\b(?:at|on|between) (?:every|each|all(?: the)?) (?:cuts?|clips?|shots?|transitions?)\b|\bbetween (?:the |all )?(?:clips|shots|scenes)\b|\bon (?:the )?cuts\b)");
+    QList<double> targets;
+    if (everyCut) {
+        targets = cuts;
+    } else if (const auto m = nthClip.match(req); m.hasMatch() && !cuts.isEmpty()) {
+        static const QHash<QString, int> ordinal{{"second", 0}, {"2nd", 0}, {"next", 0}, {"third", 1}, {"3rd", 1},
+                                                 {"fourth", 2}, {"4th", 2}, {"fifth", 3}, {"5th", 3}};
+        const QString which = m.captured(1);
+        const int k = which == QLatin1String("last") || which == QLatin1String("final") ? int(cuts.size()) - 1 : ordinal.value(which, -1);
+        if (k >= 0 && k < cuts.size()) targets << cuts[k];
+    } else if (matches(req, R"(\b(?:at|on) the cut\b)") && cuts.size() == 1) {
+        targets = cuts;
+    }
+    if (!targets.isEmpty()) {
+        QJsonArray moments = plan->value("moments").toArray();
+        int added = 0;
+        for (const auto &h : hits) {
+            if (!matches(req, h.pattern)) continue;
+            for (double t : targets) {
+                bool have = false;
+                for (const QJsonValue &v : moments) {
+                    const QJsonObject o = v.toObject();
+                    have |= o.value("effect").toString() == QLatin1String(h.name) && std::abs(seconds(o.value("at")) - t) < 0.3;
+                }
+                if (have) continue;
+                moments.append(QJsonObject{{"effect", QLatin1String(h.name)}, {"at", t}, {"duration", h.seconds}});
+                ++added;
+            }
+        }
+        if (added) {
+            plan->insert("moments", moments);
+            notes << QStringLiteral("added %1 on the cut%2").arg(added == 1 ? QStringLiteral("the effect") : QStringLiteral("%1 effects").arg(added)).arg(targets.size() == 1 ? "" : "s");
+        }
+    }
+    return notes;
+}
+
+// ---------------------------------------------------------------- generated media
+
+namespace {
+
+const char *const kVoiceWords = R"(\b(voice[ -]?overs?|voice|voiced|narrat\w*|narrator|spoken|speak(s|ing)?|read (it )?(out|aloud)|announcer|vo)\b)";
+const char *const kMusicWords = R"(\b(music|songs?|soundtrack|beats?|jingle|tune|melody|score|background (audio|track))\b)";
+const char *const kImageWords = R"(\b(images?|pictures?|photos?|illustrations?|artwork|visuals?|scenery|b-?roll|stills?|backdrop|background)\b)";
+
+QString quotedNear(const QString &request, const char *near)
+{
+    // Straight or curly quotes; an apostrophe inside ("don't") doesn't close one.
+    static const QRegularExpression quoted(QStringLiteral("(?<!\\w)[\"“‘']([^\"”]{2,200}?)[\"”’'](?=[\\s,.!?;:]|$)"));
+    QStringList all;
+    QList<qsizetype> at;
+    for (auto it = quoted.globalMatch(request); it.hasNext();) {
+        const auto m = it.next();
+        all << m.captured(1).trimmed();
+        at << m.capturedStart();
+    }
+    if (all.isEmpty()) return {};
+    // The first quote after the voice words ("a voiceover saying 'Light up your evenings'").
+    const auto v = QRegularExpression(QLatin1String(near), QRegularExpression::CaseInsensitiveOption).match(request);
+    if (v.hasMatch())
+        for (qsizetype i = 0; i < all.size(); ++i)
+            if (at[i] >= v.capturedStart() && at[i] - v.capturedEnd() < 40) return all[i];
+    return all.size() == 1 ? all.first() : QString();
+}
+
+// Video length the plan will have: main clips, else the texts.
+double planLength(const QJsonObject &plan)
+{
+    double length = 0;
+    for (double l : itemLengths(plan.value("main").toArray())) length += l;
+    if (length > 0) return length;
+    for (const QJsonValue &v : plan.value("texts").toArray()) {
+        const QJsonObject t = v.toObject();
+        const double end = seconds(t.value("at")) + seconds(t.value("duration"));
+        if (!std::isnan(end)) length = std::max(length, end);
+    }
+    return length;
+}
+
+// "a cozy background image for my candle shop" -> "cozy candle shop scene, ..."
+QString imagePrompt(const QString &request)
+{
+    const QString req = request.toLower();
+    static const QRegularExpression of(QStringLiteral(R"(\b(?:image|picture|photo|illustration|shot|background|backdrop)\s+of\s+(?:an?\s+|the\s+)?([a-z0-9' -]{3,60}?)(?=\s+(?:and|with|for|plus|then)\b|[,.;!?"]|$))"));
+    if (const auto m = of.match(req); m.hasMatch()) return m.captured(1).trimmed() + QStringLiteral(", professional photo, soft natural light");
+    static const QRegularExpression forWhat(QStringLiteral(R"(\bfor\s+(?:my|our|a|an|the)\s+(?:new\s+)?([a-z0-9' -]{3,40}?)(?=\s+(?:with|that|which|and|in|on|featuring|using)\b|[,.;!?]|$))"));
+    static const QRegularExpression look(QStringLiteral(R"(\b([a-z-]+(?:\s+[a-z-]+)?)\s+(?:background|backdrop)\s*(?:images?|pictures?|photos?)?\b)"));
+    QString subject = forWhat.match(req).captured(1).trimmed();
+    subject.remove(QRegularExpression(QStringLiteral(R"(^(\d+\s*(s|sec|second)s?\s+)?(video|ad|advert|promo|reel|tiktok|commercial)\s+(for\s+)?)")));
+    QString mood = look.match(req).captured(1).trimmed();
+    mood.remove(QRegularExpression(QStringLiteral(R"(^(a|an|the|with|and|some|nice|generated|new|ai)\b\s*)")));
+    mood.remove(QRegularExpression(QStringLiteral(R"(^(a|an|the)\b\s*)")));
+    QStringList parts;
+    if (!mood.isEmpty() && parseColor(mood).isEmpty()) parts << mood;
+    if (!subject.isEmpty()) parts << subject;
+    if (parts.isEmpty()) return QStringLiteral("soft abstract background with gentle light and depth, professional photo");
+    return parts.join(' ') + QStringLiteral(" scene, professional product photography, soft warm light, shallow depth of field");
+}
+
+// "soft music" with the "elegant" style -> instruments and mood for ACE-Step.
+QString musicPrompt(const QString &request, const QString &style)
+{
+    const QString req = request.toLower();
+    static const struct {
+        const char *pattern, *music;
+    } moods[] = {
+        {R"(\b(lo-?fi|chill ?hop)\b)", "lo-fi hip hop, mellow keys, soft drums, relaxed"},
+        {R"(\b(soft|calm|gentle|cozy|cosy|relaxing|peaceful|warm|mellow|quiet)\b)", "gentle acoustic guitar and soft piano, warm and calm"},
+        {R"(\b(upbeat|happy|fun|cheerful|bright|positive)\b)", "upbeat pop, claps, bright synths and guitar, happy"},
+        {R"(\b(energetic|hype|pumping|intense|powerful|workout)\b)", "energetic electronic pop, punchy drums, driving bass"},
+        {R"(\b(epic|cinematic|dramatic|trailer)\b)", "cinematic orchestral, big drums, rising strings"},
+        {R"(\b(jazz|jazzy)\b)", "smooth jazz, upright bass, brushed drums, piano"},
+        {R"(\b(rock|guitar)\b)", "rock, electric guitar riffs, driving drums"},
+        {R"(\b(electronic|edm|techno|house|synth)\b)", "electronic dance, four on the floor, synth leads"},
+        {R"(\b(hip ?hop|trap|rap)\b)", "modern hip hop beat, deep bass, crisp hi-hats"},
+        {R"(\b(corporate|business|tech)\b)", "light corporate pop, plucked synths, optimistic"},
+        {R"(\b(elegant|classy|luxury|luxurious|premium)\b)", "elegant piano and strings, refined and slow"},
+        {R"(\b(playful|kids|cute|quirky)\b)", "playful ukulele and glockenspiel, bouncy"},
+    };
+    for (const auto &m : moods)
+        if (matches(req, m.pattern)) return QString::fromLatin1(m.music);
+    static const QHash<QString, QString> byStyle{
+        {"energetic", "energetic electronic pop, punchy drums, driving bass"}, {"bold", "bold hip hop beat, heavy bass, confident"},
+        {"playful", "playful ukulele and glockenspiel, bouncy"},             {"elegant", "elegant piano and strings, refined"},
+        {"luxury", "luxurious slow cinematic strings and piano, warm"},      {"minimal", "minimal ambient electronic, soft pads"},
+    };
+    return byStyle.value(style, QStringLiteral("modern upbeat background music, light percussion, positive"));
+}
+
+bool projectHasMusic(const Draft &d, const MediaIndex &index)
+{
+    for (const QString &id : index.materialIds())
+        if (const Material *m = d.material(id); m->kind == MaterialKind::Audio && !isVoiceover(*m)) return true;
+    return false;
+}
+
+bool projectHasVisuals(const Draft &d, const MediaIndex &index)
+{
+    for (const QString &id : index.materialIds())
+        if (d.material(id)->isVisual()) return true;
+    return false;
+}
+
+}  // namespace
+
+QString voiceoverScript(const QString &request)
+{
+    return matches(request.toLower(), kVoiceWords) ? quotedNear(request, kVoiceWords) : QString();
+}
+
+QStringList requestedGeneration(const QString &request, const QJsonObject &current, const Draft &d, const MediaIndex &index,
+                                QJsonObject *plan)
+{
+    const QString req = request.toLower();
+    QStringList notes;
+    const bool removing = matches(req, R"(\b(remove|delete|without|get rid|take (it |them )?(off|out)|no more|mute|drop|stop)\b)");
+    // Asking for new media, not just a video: "generate a background image", "compose some new upbeat music".
+    const bool asksToMake = matches(req, R"(\b(generate|generated|create|compose|make|new|original|custom|ai)\b(\s+[a-z-]+){0,3}?\s+(music|songs?|tracks?|tunes?|jingle|soundtrack|images?|pictures?|photos?|illustrations?|backgrounds?|voice[ -]?overs?)\b)");
+    // A voiceover the user already has ("with the voiceover") is used, not remade.
+    bool haveVoiceFile = false;
+    for (const QString &id : index.materialIds())
+        if (const Material *m = d.material(id); m && m->kind == MaterialKind::Audio && isVoiceover(*m)) haveVoiceFile = true;
+    const bool wantsVoice = !removing && matches(req, kVoiceWords) && (!haveVoiceFile || asksToMake);
+    const bool wantsMusic = !removing && matches(req, kMusicWords) && (!projectHasMusic(d, index) || asksToMake);
+    // An image when the request asks for one and isn't about the user's own pictures.
+    const bool ownPictures = projectHasVisuals(d, index)
+                             && matches(req, R"(\b(my|our|the|this|these|those)\s+(own\s+)?(photos?|pictures?|images?|clips?|videos?|footage|shots?)\b)");
+    const bool imageWords = matches(req, R"(\b(images?|pictures?|photos?|illustrations?|artwork|visuals?|scenery|b-?roll|stills?)\b)")
+                            || (requestedBackground(request).isEmpty() && matches(req, R"(\b(background|backdrop)\b)") && !projectHasVisuals(d, index));
+    const bool wantsImage = !removing && imageWords && !ownPictures && (!projectHasVisuals(d, index) || asksToMake);
+
+    // Keep only what was asked for.
+    QJsonArray kept;
+    QStringList dropped;
+    bool haveVoice = false, haveMusic = false, haveImage = false;
+    const QString quote = voiceoverScript(request);
+    const QString voice = voiceFor(request);
+    for (const QJsonValue &v : plan->value("generate").toArray()) {
+        QJsonObject o = v.toObject();
+        QString kind = o.value("kind").toString().trimmed().toLower();
+        if (kind == QLatin1String("voice") || kind == QLatin1String("narration") || kind == QLatin1String("speech")) kind = QStringLiteral("voiceover");
+        const bool wanted = kind == QLatin1String("voiceover") ? wantsVoice : kind == QLatin1String("music") ? wantsMusic : wantsImage;
+        if (!wanted) {
+            dropped << kind;
+            continue;
+        }
+        if (kind == QLatin1String("voiceover")) {
+            haveVoice = true;
+            // The user's exact words, not the model's paraphrase.
+            if (!quote.isEmpty() && o.value("text").toString().trimmed() != quote) {
+                o.insert("text", quote);
+                notes << QStringLiteral("the voiceover says \"%1\" as written").arg(quote);
+            }
+            if (!voice.isEmpty()) o.insert("voice", voice);
+        }
+        haveMusic |= kind == QLatin1String("music");
+        haveImage |= kind == QLatin1String("image");
+        kept.append(o);
+    }
+    if (!dropped.isEmpty()) notes << QStringLiteral("skipped generating %1 the request didn't ask for").arg(dropped.join(" and "));
+
+    // What the plan already plays.
+    bool playsVoice = false, playsMusic = false, showsImage = false;
+    for (const QJsonObject &p : {current, *plan})
+        for (const char *key : {"main", "overlays", "audio"})
+            for (const QJsonValue &v : p.value(QLatin1String(key)).toArray()) {
+                const Material *m = lookup(v.toObject().value("media").toString(), d, index);
+                if (!m) continue;
+                if (m->kind == MaterialKind::Audio) (isVoiceover(*m) ? playsVoice : playsMusic) = true;
+                else if (generatedKind(m->name) == QLatin1String("image")) showsImage = true;
+            }
+    // Names for added items: the ones the plan already uses where they are
+    // (models often skip the list but write {"media": "g1"}). An image takes
+    // a picture's name; music takes a sound that runs the whole video or sits
+    // low, a voiceover one that doesn't. No match: a fresh name, and the item
+    // is placed later.
+    static const QRegularExpression genName(QStringLiteral("^g\\d+$"));
+    QSet<QString> used;
+    for (const QJsonValue &v : kept) used << v.toObject().value("as").toString().toLower();
+    QStringList pictureRefs, musicRefs, voiceRefs;
+    const double videoLength = planLength(*plan);
+    for (const char *key : {"main", "overlays", "audio"})
+        for (const QJsonValue &v : plan->value(QLatin1String(key)).toArray()) {
+            const QJsonObject o = v.toObject();
+            const QString ref = o.value("media").toString().trimmed().toLower();
+            if (!genName.match(ref).hasMatch() || used.contains(ref) || pictureRefs.contains(ref) || musicRefs.contains(ref)
+                || voiceRefs.contains(ref))
+                continue;
+            if (QLatin1String(key) != QLatin1String("audio")) {
+                pictureRefs << ref;
+                continue;
+            }
+            const double volume = o.contains("volume") ? seconds(o.value("volume")) : 1.0;
+            const double span = seconds(o.value("to")) - seconds(o.value("from"));
+            const bool musicLike = volume < 0.9 || (videoLength > 0 && span >= 0.8 * videoLength);
+            (musicLike ? musicRefs : voiceRefs) << ref;
+        }
+    auto nameFor = [&](const QString &kind) {
+        QStringList &refs = kind == QLatin1String("image") ? pictureRefs : kind == QLatin1String("music") ? musicRefs : voiceRefs;
+        QString name = refs.isEmpty() ? QString() : refs.takeFirst();
+        for (int i = 1; name.isEmpty(); ++i) {
+            const QString g = QStringLiteral("g%1").arg(i);
+            if (!used.contains(g) && !pictureRefs.contains(g) && !musicRefs.contains(g) && !voiceRefs.contains(g)) name = g;
+        }
+        used << name;
+        return name;
+    };
+
+    if (wantsImage && !haveImage && !showsImage) {
+        const QString prompt = imagePrompt(request);
+        kept.append(QJsonObject{{"kind", "image"}, {"prompt", prompt}, {"as", nameFor("image")}});
+        notes << QStringLiteral("added a generated image (%1)").arg(prompt.section(',', 0, 0));
+    }
+    // The same words already playing (an earlier answer, or a retry) aren't asked for again.
+    bool saysQuote = false;
+    if (!quote.isEmpty()) {
+        GenRequest same;
+        same.kind = QStringLiteral("voiceover");
+        same.text = quote;
+        const QString stem = same.fileName().section(QLatin1Char('-'), 0, -2);
+        for (const QJsonValue &v : plan->value("audio").toArray())
+            if (const Material *m = lookup(v.toObject().value("media").toString(), d, index))
+                saysQuote |= m->name.section(QLatin1Char('-'), 0, -2) == stem;
+    }
+    if (wantsVoice && !haveVoice && !saysQuote && (!quote.isEmpty() || !playsVoice)) {
+        QString script = quote;
+        if (script.isEmpty()) {  // read the on-screen words
+            QStringList lines;
+            for (const QJsonValue &v : plan->value("texts").toArray()) {
+                QString t = v.toObject().value("text").toString().simplified();
+                if (t.isEmpty() || lines.contains(t)) continue;
+                if (!t.endsWith('.') && !t.endsWith('!') && !t.endsWith('?')) t += '.';
+                lines << t;
+            }
+            script = lines.join(' ');
+        }
+        if (!script.isEmpty()) {
+            QJsonObject o{{"kind", "voiceover"}, {"text", script}, {"as", nameFor("voiceover")}};
+            if (!voice.isEmpty()) o.insert("voice", voice);
+            kept.append(o);
+            notes << QStringLiteral("added a voiceover saying \"%1\"").arg(script);
+        }
+    }
+    if (wantsMusic && !haveMusic && !playsMusic) {
+        const double want = requestedLength(request);
+        const double length = want > 0 ? want : planLength(*plan);
+        const QString style = plan->value("style").toString(current.value("style").toString());
+        const QString prompt = musicPrompt(request, style);
+        kept.append(QJsonObject{{"kind", "music"}, {"prompt", prompt}, {"seconds", std::ceil(length > 0 ? length : 15)}, {"as", nameFor("music")}});
+        notes << QStringLiteral("added generated music (%1)").arg(prompt.section(',', 0, 0));
+    }
+
+    if (kept.isEmpty()) plan->remove("generate");
+    else plan->insert("generate", kept);
+    return notes;
+}
+
+QStringList placeGenerated(const QStringList &generated, const QString &request, const Draft &d, const MediaIndex &index,
+                           QJsonObject *plan)
+{
+    QSet<QString> used;
+    for (const char *key : {"main", "overlays", "audio"})
+        for (const QJsonValue &v : plan->value(QLatin1String(key)).toArray())
+            if (const Material *m = lookup(v.toObject().value("media").toString(), d, index)) used << index.alias(m->id);
+
+    // How long the video should be: asked for, else long enough for the texts and the voiceover.
+    double voiceEnd = 0;
+    for (const QString &alias : generated)
+        if (const Material *m = d.material(index.materialId(alias)); m && isVoiceover(*m)) voiceEnd = std::max(voiceEnd, 0.5 + m->durationUs / 1e6 + 0.7);
+    const double want = requestedLength(request);
+    double length = 0;
+    for (double l : itemLengths(plan->value("main").toArray())) length += l;
+    if (length <= 0) length = want > 0 ? want : std::max({5.0, voiceEnd, planLength(*plan)});
+
+    QStringList notes;
+    QJsonArray main = plan->value("main").toArray(), audio = plan->value("audio").toArray();
+    // A generated voiceover always plays whole: the model can't know how long
+    // it is. One made for this request is heard at full volume.
+    const bool aboutVolume = matches(request.toLower(), R"(\b(louder|quieter|softer|volume|turn (it |the [a-z]+ )?(up|down))\b)");
+    bool trimmed = false;
+    for (qsizetype i = 0; i < audio.size(); ++i) {
+        QJsonObject o = audio[i].toObject();
+        const Material *m = lookup(o.value("media").toString(), d, index);
+        if (!m || generatedKind(m->name) != QLatin1String("voiceover")) continue;
+        const double len = std::floor(m->durationUs / 1e4) / 100;
+        const double volume = o.contains("volume") ? seconds(o.value("volume")) : 1.0;
+        const bool quiet = generated.contains(index.alias(m->id)) && !aboutVolume && !(volume >= 0.9);
+        if (seconds(o.value("from")) == 0 && seconds(o.value("to")) == len && !quiet) continue;
+        o.insert("from", 0);
+        o.insert("to", len);
+        if (quiet) o.insert("volume", 1);
+        audio[i] = o;
+        trimmed = true;
+    }
+    for (const QString &alias : generated) {
+        const Material *m = d.material(index.materialId(alias));
+        if (!m || used.contains(alias)) continue;
+        if (m->kind == MaterialKind::Image) {
+            const bool first = main.isEmpty();
+            main.append(QJsonObject{{"media", alias}, {"from", 0}, {"to", round2(first ? length : 3)}});
+            notes << (first ? QStringLiteral("used the generated image as the picture") : QStringLiteral("added the generated image as a clip"));
+        } else if (isVoiceover(*m)) {
+            // Start with the on-screen words it reads, if they're there.
+            double at = length > 3 ? 0.5 : 0;
+            const QString stem = QFileInfo(m->name).completeBaseName();
+            for (const QJsonValue &v : plan->value("texts").toArray()) {
+                const QJsonObject t = v.toObject();
+                QString words = t.value("text").toString().toLower();
+                words.replace(QRegularExpression(QStringLiteral("[^a-z0-9]+")), QStringLiteral("-"));
+                if (words.size() >= 4 && stem.contains(words)) {
+                    at = std::max(0.0, seconds(t.value("at")));
+                    break;
+                }
+            }
+            const double len = m->durationUs / 1e6;
+            audio.append(QJsonObject{{"media", alias}, {"at", round2(at)}, {"from", 0}, {"to", round2(len)}, {"volume", 1}});
+            notes << QStringLiteral("put the voiceover in at %1s").arg(round2(at));
+        } else if (m->kind == MaterialKind::Audio) {
+            audio.prepend(QJsonObject{{"media", alias}, {"at", 0}, {"from", 0},
+                                      {"to", round2(std::min(length, m->durationUs / 1e6))}, {"volume", 0.8}});
+            notes << QStringLiteral("put the generated music under the video");
+        }
+    }
+    if (!notes.isEmpty() || trimmed) {
+        plan->insert("main", main);
+        plan->insert("audio", audio);
+    }
+    return notes;
+}
+
+bool duckUnderVoiceover(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan)
+{
+    if (matches(request.toLower(), R"(\b(louder|quieter|softer|volume|turn (it |the music |the song )?(up|down)|mute|unmute)\b)")) return false;
+    QJsonArray audio = plan->value("audio").toArray();
+    bool voice = false;
+    for (const QJsonValue &v : audio)
+        if (const Material *m = lookup(v.toObject().value("media").toString(), d, index); m && isVoiceover(*m)) voice = true;
+    if (!voice) return false;
+    // The voice is marked as speech; music keeps its level between phrases
+    // and dips to a quarter (or to where the model already put it) while
+    // the voice talks, like an editor riding the fader.
+    bool changed = false;
+    for (qsizetype i = 0; i < audio.size(); ++i) {
+        QJsonObject o = audio[i].toObject();
+        const Material *m = lookup(o.value("media").toString(), d, index);
+        if (!m) continue;
+        if (isVoiceover(*m)) {
+            if (!o.value("speech").toBool()) o.insert("speech", true), changed = true;
+            audio[i] = o;
+            continue;
+        }
+        if (o.contains("duck") && seconds(o.value("duck")) > 0) continue;
+        double vol = o.contains("volume") ? seconds(o.value("volume")) : 1;
+        if (std::isnan(vol)) vol = 1;
+        // Lowered for the voice already: bring it back up and duck instead.
+        const double level = vol <= 0.4 ? 0.8 : vol;
+        o.insert("volume", round2(level));
+        o.insert("duck", round2(std::clamp(0.25 / level, 0.1, 0.6)));
+        audio[i] = o;
+        changed = true;
+    }
+    if (changed) plan->insert("audio", audio);
+    return changed;
+}
+
+QString musicOffer(const QString &request, const QJsonObject &plan, const Draft &d, const MediaIndex &index)
+{
+    const QString req = request.toLower();
+    const QString style = plan.value("style").toString();
+    if (style.isEmpty() && !matches(req, R"(\b(ad|advert|advertisement|commercial|promo|promotional)\b)")) return {};
+    if (matches(req, R"(\b(no|without|silent|mute|muted|quiet)\b)") || projectHasMusic(d, index)) return {};
+    for (const QJsonValue &v : plan.value("generate").toArray())
+        if (v.toObject().value("kind").toString() == QLatin1String("music")) return {};
+    for (const QJsonValue &v : plan.value("audio").toArray())
+        if (const Material *m = lookup(v.toObject().value("media").toString(), d, index); m && !isVoiceover(*m)) return {};
+    return QStringLiteral("There's no music yet. Say \"add music\" and I'll compose %1 track for it.")
+        .arg(style.isEmpty() ? QStringLiteral("a") : (QStringLiteral("aeiou").contains(style.at(0)) ? "an " : "a ") + style);
+}
+
+QStringList applySmartRequests(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan)
+{
+    const QString req = request.toLower();
+    const bool removing = matches(req, R"(\b(remove|delete|turn off|switch off|get rid of|no more|without|stop|don't|do not)\b)");
+    QStringList notes;
+
+    // Cut to the beat.
+    const bool beatWords = matches(req, R"(\b(on|to|with) the (beat|beats|rhythm|music|song|drop)|\bbeat[- ]?(sync|synced|matched)|\bsync(ed)? (it |the cuts |everything )?(to|with) the (music|song|beat|track)|\bin time with the (music|song)|\brhythm(ic)?\b|\bcut(s)? (it )?to the (music|song|beat))");
+    if (beatWords) {
+        const QString mode = removing && matches(req, R"(\b(beat|rhythm|sync)\b)") ? QStringLiteral("off")
+                             : matches(req, R"(\b(bars?|downbeats?|every (bar|measure)|slower cuts?)\b)") ? QStringLiteral("bars")
+                                                                                                      : QStringLiteral("beats");
+        if (plan->value("beat_sync").toString() != mode) {
+            plan->insert("beat_sync", mode);
+            notes << (mode == QLatin1String("off") ? QStringLiteral("stopped cutting to the beat")
+                                                   : QStringLiteral("cutting to the %1").arg(mode == QLatin1String("bars") ? "bars" : "beat"));
+        }
+    }
+
+    // Auto captions: "add captions", "subtitle it", "caption what she says" - not
+    // "add a caption that says 'Hi'", which is a text.
+    const bool quoted = request.contains(QLatin1Char('"')) || request.contains(QChar(0x201C)) || request.contains(QLatin1Char('\''));
+    const bool autoCaptions = matches(req, R"(\b(captions|subtitles|subtitle (it|this|the video)|closed captions|transcribe|auto[- ]?captions?|caption (it|this|the video|the voice ?over|the voice|what (he|she|they|i|it) says?|the (speech|dialogue|words|audio|narration)))\b)")
+                              && !(quoted && matches(req, R"(\b(a|the) caption\b)"));
+    if (autoCaptions) {
+        if (removing) {
+            if (!plan->value("captions").toString().isEmpty() && plan->value("captions") != QLatin1String("none")) {
+                plan->insert("captions", "none");
+                notes << QStringLiteral("removed the captions");
+            }
+        } else if (plan->value("captions").toString().isEmpty() || plan->value("captions") == QLatin1String("none")) {
+            const QString style = plan->value("style").toString();
+            const bool lively = matches(req, R"(\b(tiktok|reels?|shorts|kinetic|animated|word by word|pop)\b)") || style == QLatin1String("energetic")
+                                || style == QLatin1String("bold") || style == QLatin1String("playful");
+            plan->insert("captions", lively ? "kinetic-caption" : "caption");
+            notes << QStringLiteral("captioning what's said");
+        }
+    }
+
+    // Duck music under talking.
+    if (!removing && matches(req, R"(\b(duck(ing)?|(lower|quieter|soften|dip|drop) the (music|song|track) (when|while|whenever|under)|music (down|lower|quieter) (when|while|whenever|under)|under the (voice|voiceover|narration|talking|speech))\b)")) {
+        QJsonArray audio = plan->value("audio").toArray();
+        bool changed = false;
+        for (qsizetype i = 0; i < audio.size(); ++i) {
+            QJsonObject o = audio[i].toObject();
+            const Material *m = lookup(o.value("media").toString(), d, index);
+            if (!m) continue;
+            if (isVoiceover(*m)) {
+                if (!o.value("speech").toBool()) o.insert("speech", true), changed = true;
+            } else if (!(o.contains("duck") && seconds(o.value("duck")) > 0)) {
+                o.insert("duck", 0.3);
+                changed = true;
+            }
+            audio[i] = o;
+        }
+        // The people talking are in the clips: mark main video with sound as speech.
+        bool voiceInAudio = false;
+        for (const QJsonValue &v : audio) voiceInAudio |= v.toObject().value("speech").toBool();
+        if (!voiceInAudio) {
+            QJsonArray main = plan->value("main").toArray();
+            for (qsizetype i = 0; i < main.size(); ++i) {
+                QJsonObject o = main[i].toObject();
+                const Material *m = lookup(o.value("media").toString(), d, index);
+                if (m && m->kind == MaterialKind::Video && m->hasAudio && !o.value("speech").toBool()) o.insert("speech", true), changed = true;
+                main[i] = o;
+            }
+            plan->insert("main", main);
+        }
+        if (changed) {
+            plan->insert("audio", audio);
+            notes << QStringLiteral("the music dips whenever someone talks");
+        }
+    }
+
+    // Remove the background.
+    if (matches(req, R"(\b(remove|erase|drop|get rid of|cut out|delete|lose) (the |its |their |his |her )?(back ?ground|backdrop)|\bcut ?out\b|\bisolate (the )?(subject|product|person)|\bbackground removal\b|\bno background\b)")) {
+        const bool photos = matches(req, R"(\b(photos?|pictures?|images?|stills?|products?|logo)\b)");
+        QJsonArray main = plan->value("main").toArray();
+        int added = 0;
+        int visual = 0;
+        for (const QJsonValue &v : main)
+            if (const Material *m = lookup(v.toObject().value("media").toString(), d, index); m && m->isVisual()) ++visual;
+        for (qsizetype i = 0; i < main.size(); ++i) {
+            QJsonObject o = main[i].toObject();
+            const Material *m = lookup(o.value("media").toString(), d, index);
+            if (!m || !m->isVisual() || (photos && visual > 1 && m->kind != MaterialKind::Image)) continue;
+            QJsonArray fx = o.value("effects").toArray();
+            bool has = false;
+            for (const QJsonValue &e : fx) has |= e.toObject().value("name").toString() == QLatin1String("cutout");
+            if (has) continue;
+            fx.prepend(QJsonObject{{"name", "cutout"}});
+            o.insert("effects", fx);
+            if (!o.contains("framing")) o.insert("framing", "fit");  // show the whole subject
+            main[i] = o;
+            ++added;
+        }
+        if (added) {
+            plan->insert("main", main);
+            notes << QStringLiteral("removed the background from %1 clip%2").arg(added).arg(added == 1 ? "" : "s");
+        }
+    }
     return notes;
 }
 

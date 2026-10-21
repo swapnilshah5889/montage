@@ -1,0 +1,240 @@
+{
+  "about": "Smart-edit eval: beat sync, captions, ducking, background removal. Needs tests/make_media.sh (beat.mp3, voiceover.wav) and whisper.cpp for captions. Run: Montage --eval tests/eval/smart.json --media tests/media --profile <id>",
+  "cases": [
+    {
+      "name": "beat-cut",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4",
+        "beat.mp3"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 2.8
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 3.1
+          },
+          {
+            "media": "m3",
+            "from": 0,
+            "to": 4.1
+          }
+        ],
+        "audio": [
+          {
+            "media": "m4",
+            "at": 0,
+            "from": 0,
+            "to": 10,
+            "volume": 0.8
+          }
+        ]
+      },
+      "requests": [
+        "Cut it to the beat of the music"
+      ],
+      "checks": [
+        {
+          "type": "beat_sync",
+          "value": "beats"
+        },
+        {
+          "type": "on_beat",
+          "media": "beat.mp3"
+        },
+        {
+          "type": "length",
+          "min": 9.9,
+          "max": 10.1
+        },
+        {
+          "type": "main_count",
+          "min": 3,
+          "max": 3
+        }
+      ]
+    },
+    {
+      "name": "captions-voiceover",
+      "media": [
+        "beach.mp4",
+        "voiceover.wav"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          }
+        ],
+        "audio": [
+          {
+            "media": "m2",
+            "at": 0.5,
+            "from": 0,
+            "to": 2.8,
+            "volume": 1
+          }
+        ]
+      },
+      "requests": [
+        "Add captions for the voiceover"
+      ],
+      "checks": [
+        {
+          "type": "captions",
+          "min": 2,
+          "contains": "bread"
+        },
+        {
+          "type": "length",
+          "min": 4.9,
+          "max": 5.1
+        }
+      ]
+    },
+    {
+      "name": "duck-music",
+      "media": [
+        "beach.mp4",
+        "beat.mp3",
+        "voiceover.wav"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 8
+          }
+        ],
+        "audio": [
+          {
+            "media": "m2",
+            "at": 0,
+            "from": 0,
+            "to": 8,
+            "volume": 0.8
+          },
+          {
+            "media": "m3",
+            "at": 1,
+            "from": 0,
+            "to": 2.8,
+            "volume": 1
+          }
+        ]
+      },
+      "requests": [
+        "Lower the music whenever the voiceover talks"
+      ],
+      "checks": [
+        {
+          "type": "duck",
+          "media": "beat.mp3"
+        },
+        {
+          "type": "audio",
+          "media": "voiceover.wav"
+        },
+        {
+          "type": "length",
+          "min": 7.9,
+          "max": 8.1
+        }
+      ]
+    },
+    {
+      "name": "cutout-photo",
+      "media": [
+        "photo.png",
+        "beach.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 3
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 4
+          }
+        ]
+      },
+      "requests": [
+        "Remove the background from the photo and put it on a white background"
+      ],
+      "checks": [
+        {
+          "type": "main_effect",
+          "name": "cutout",
+          "min": 1
+        },
+        {
+          "type": "background",
+          "value": "#FFFFFF"
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        }
+      ]
+    },
+    {
+      "name": "bakery-ad",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "forest.mp4",
+        "beat.mp3",
+        "voiceover.wav"
+      ],
+      "requests": [
+        "Make a 12 second energetic vertical ad for my bakery with the beat and the voiceover. Cut on the beat and add captions"
+      ],
+      "checks": [
+        {
+          "type": "length",
+          "min": 11.5,
+          "max": 12.5
+        },
+        {
+          "type": "aspect",
+          "value": "9:16"
+        },
+        {
+          "type": "beat_sync",
+          "value": "beats"
+        },
+        {
+          "type": "on_beat",
+          "media": "beat.mp3"
+        },
+        {
+          "type": "captions",
+          "min": 1
+        },
+        {
+          "type": "audio",
+          "media": "beat.mp3"
+        },
+        {
+          "type": "audio",
+          "media": "voiceover.wav"
+        }
+      ]
+    }
+  ]
+}

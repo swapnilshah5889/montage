@@ -1,7 +1,9 @@
 #include "EditPlan.h"
 
 #include "AdStyles.h"
+#include "Generators.h"
 #include "engine/Animation.h"
+#include "engine/Beats.h"
 #include "engine/Effects.h"
 
 #include <QColor>
@@ -344,7 +346,7 @@ QJsonObject planFromDraft(const Draft &d, const MediaIndex &index)
             const Material *m = d.material(s.materialId);
             if (!m) continue;
             if (m->kind == MaterialKind::Text) {
-                texts.append(textItem(s));
+                if (s.origin != QLatin1String("captions")) texts.append(textItem(s));  // auto captions: see "captions"
                 continue;
             }
             if (m->kind == MaterialKind::Effect) {
@@ -373,6 +375,7 @@ QJsonObject planFromDraft(const Draft &d, const MediaIndex &index)
                     o.insert("transition", "none");  // a hard cut someone chose; a restyle keeps it
                 }
                 if (s.framing != QLatin1String("auto")) o.insert("framing", s.framing);
+                if (s.speech) o.insert("speech", true);
                 main.append(o);
             } else if (t.role == TrackRole::Overlay) {
                 o.insert("at", num(secs(s.start)));
@@ -398,6 +401,8 @@ QJsonObject planFromDraft(const Draft &d, const MediaIndex &index)
             } else {
                 o.insert("at", num(secs(s.start)));
                 o.insert("volume", num(s.volume));
+                if (s.speech) o.insert("speech", true);
+                if (s.duck > 0) o.insert("duck", num(s.duck));
                 audio.append(o);
             }
         }
@@ -412,6 +417,8 @@ QJsonObject planFromDraft(const Draft &d, const MediaIndex &index)
     if (!moments.isEmpty()) plan.insert("moments", moments);
     if (QColor(d.canvas.background) != QColor(Qt::black)) plan.insert("background", d.canvas.background.toUpper());
     if (!d.style.isEmpty()) plan.insert("style", d.style);
+    if (!d.beatSync.isEmpty()) plan.insert("beat_sync", d.beatSync);
+    if (!d.captions.isEmpty()) plan.insert("captions", d.captions);
     return plan;
 }
 
@@ -678,6 +685,21 @@ Draft draftFromPlan(const Draft &current, const QJsonObject &plan, const MediaIn
                                      .arg(style, adStyleNames().join(", "));
     }
 
+    if (plan.contains("beat_sync")) {
+        const QString mode = plan.value("beat_sync").toString().trimmed().toLower();
+        if (beatSyncNames().contains(mode)) out.beatSync = mode;
+        else if (mode == QLatin1String("beat")) out.beatSync = QStringLiteral("beats");
+        else if (mode == QLatin1String("bar")) out.beatSync = QStringLiteral("bars");
+        else out.beatSync.clear();  // "off", "none", ""
+    }
+    if (plan.contains("captions")) {
+        const QString style = plan.value("captions").toString().trimmed().toLower();
+        if (textPresetNames().contains(style)) out.captions = style;
+        else if (style == QLatin1String("auto") || style == QLatin1String("on") || plan.value("captions").toBool())
+            out.captions = QStringLiteral("caption");
+        else out.captions.clear();
+    }
+
     // Main track, back to back
     QJsonArray mainItems = plan.value("main").toArray();
 
@@ -743,6 +765,7 @@ Draft draftFromPlan(const Draft &current, const QJsonObject &plan, const MediaIn
                 report->warnings << QStringLiteral("%1: unknown transition \"%2\"; use one of %3.").arg(where, tr, transitionNames().join(", "));
             }
         }
+        s.speech = item.value("speech").toBool();
         if (item.contains("framing")) {
             const QString f = item.value("framing").toString().trimmed().toLower();
             if (framingNames().contains(f)) s.framing = f;
@@ -830,6 +853,8 @@ Draft draftFromPlan(const Draft &current, const QJsonObject &plan, const MediaIn
         s.duration = toUs(len);
         s.sourceStart = toUs(from);
         s.volume = b.optNumber(item, "volume", 1, 0, 2);
+        s.speech = item.value("speech").toBool();
+        if (item.contains("duck")) s.duck = b.optNumber(item, "duck", 0.3, 0, 1);
         b.placeOn(TrackRole::Audio, s);
     }
 
@@ -949,7 +974,7 @@ QJsonObject planSchema()
     const QJsonObject clip = obj(animated({{"media", string()}, {"from", number()}, {"to", number()}, {"volume", number()},
                                            {"opacity", number()}, {"scale", number()}, {"x", number()}, {"y", number()},
                                            {"transition", choice(transitionNames() << "none")}, {"transition_duration", number()},
-                                           {"framing", choice(framingNames())},
+                                           {"framing", choice(framingNames())}, {"speech", QJsonObject{{"type", "boolean"}}},
                                            {"speed", number()}, {"speed_curve", choice(speedCurveNames())}, {"duration", number()}}),
                                  {"media", "from", "to"});
     const QJsonObject overlay = obj(animated({{"media", string()}, {"at", number()}, {"from", number()}, {"to", number()},
@@ -958,7 +983,7 @@ QJsonObject planSchema()
                                               {"y", number()}, {"volume", number()}, {"opacity", number()}}),
                                     {"media", "at", "from", "to", "position"});
     const QJsonObject audio = obj({{"media", string()}, {"at", number()}, {"from", number()}, {"to", number()},
-                                   {"volume", number()}},
+                                   {"volume", number()}, {"speech", QJsonObject{{"type", "boolean"}}}, {"duck", number()}},
                                   {"media", "at", "from", "to", "volume"});
     const QJsonObject text = obj(animated({{"text", string()}, {"at", number()}, {"duration", number()},
                                   {"style", choice(textPresetNames())}, {"position", choice(kTextPositions)},
@@ -968,8 +993,13 @@ QJsonObject planSchema()
                                   {"scale", number()}, {"shadow", string()}, {"gradient", string()},
                                   {"shape", choice(textShapeNames())}}),
                                  {"text", "at", "duration", "style"});
+    // Media made by local models; later items use it as "media": "<as>".
+    const QJsonObject generate = obj({{"kind", choice(generateKinds())}, {"prompt", string()}, {"text", string()},
+                                      {"voice", choice(voiceNames())}, {"seconds", number()}, {"as", string()}},
+                                     {"kind", "as"});
 
     return obj({{"reply", string()},
+                {"generate", array(generate)},
                 {"aspect", choice({"keep", "original", "16:9", "9:16", "1:1", "4:5", "4:3", "3:4", "21:9"})},
                 {"main", array(clip)},
                 {"overlays", array(overlay)},
@@ -977,6 +1007,8 @@ QJsonObject planSchema()
                 {"texts", array(text)},
                 {"background", string()},
                 {"style", choice(adStyleNames() << "none")},
+                {"beat_sync", choice(beatSyncNames() << "off")},
+                {"captions", choice(textPresetNames() << "none")},
                 {"moments", array(obj({{"effect", choice(momentNames() + effectNames())}, {"at", number()},
                                        {"duration", number()}, {"amount", number()}},
                                       {"effect", "at", "duration"}))},

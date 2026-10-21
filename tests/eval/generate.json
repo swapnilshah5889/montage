@@ -1,0 +1,109 @@
+{
+  "about": "Generated media eval: images (ComfyUI), voiceovers (Kokoro), music (ACE-Step). Cases list the backends they need under \"requires\" and are skipped when one is down. Generated files are cached in ~/Movies/Montage/Generated, so re-runs are fast. Run: Montage --eval tests/eval/generate.json --media tests/media --profile <id>",
+  "cases": [
+    {
+      "name": "candle-ad-from-nothing",
+      "media": [],
+      "requires": [
+        "image",
+        "voiceover",
+        "music"
+      ],
+      "requests": [
+        "Make a 10 second ad for my candle shop with a cozy background image, a voiceover saying \"Light up your evenings\" and soft music"
+      ],
+      "checks": [
+        {
+          "type": "length",
+          "min": 9.5,
+          "max": 10.5
+        },
+        {
+          "type": "generated",
+          "kind": "image",
+          "role": "main"
+        },
+        {
+          "type": "generated",
+          "kind": "voiceover",
+          "min_volume": 0.9
+        },
+        {
+          "type": "generated",
+          "kind": "music",
+          "max_volume": 0.3,
+          "covers_video": true
+        }
+      ]
+    },
+    {
+      "name": "voiceover-over-own-song",
+      "media": [
+        "beach.mp4",
+        "city.mov",
+        "song.mp3"
+      ],
+      "requires": [
+        "voiceover"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 5
+          },
+          {
+            "media": "m2",
+            "from": 0,
+            "to": 5
+          }
+        ],
+        "audio": [
+          {
+            "media": "m3",
+            "at": 0,
+            "from": 0,
+            "to": 10,
+            "volume": 0.8
+          }
+        ]
+      },
+      "requests": [
+        "Add a voiceover saying \"Summer starts now\""
+      ],
+      "checks": [
+        {
+          "type": "generated",
+          "kind": "voiceover",
+          "min_volume": 0.9
+        },
+        {
+          "type": "generated",
+          "kind": "music",
+          "max": 0
+        },
+        {
+          "type": "generated",
+          "kind": "image",
+          "max": 0
+        },
+        {
+          "type": "audio",
+          "media": "song.mp3",
+          "max_volume": 0.3
+        },
+        {
+          "type": "main_count",
+          "min": 2,
+          "max": 2
+        },
+        {
+          "type": "length",
+          "min": 9.5,
+          "max": 10.5
+        }
+      ]
+    }
+  ]
+}

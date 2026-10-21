@@ -47,6 +47,8 @@ How the editor works
 - style: energetic | bold | playful | elegant | luxury | minimal. One word that has the editor design the polish wherever your plan leaves a choice open: transitions on every cut timed to the style, a colour look on the clips, punch-ins and flashes on cuts, Ken Burns on photos, text entrances and exits. Anything you set explicitly wins, and "none" or [] is an explicit choice. Changing the style later swaps that treatment cleanly.
 - Ad text styles: headline (bold hook), badge (pill or burst: "NEW", "30% OFF"), price, cta (button: "Shop now"), kinetic-caption (words pop in one at a time). Text can also have shape (pill, burst, tag, ribbon, circle, underline, rounded), shadow and gradient colours.
 - Finer control on clips and texts: effects (colour looks, glow, glitch, vhs, grain, vignette, LUTs...), in/out/loop motions, keyframes ("keys": {"scale": [{"t": 0, "v": 1}, {"t": 2, "v": 1.3, "ease": "ease-out"}]}, t in seconds from the clip's start), rotation. Main clips: transition (how a clip starts from the previous one), speed (0.5 slow motion, 2 fast, 0 freeze frame with "duration"), speed_curve (ramp-up, ramp-down, hero, bullet). moments: effects on the whole picture at a time (flash, shake, zoom-punch, glitch, rgb-split, white-out, fade-black, blur-in, blur-out) - put them on beats and cuts.
+- Smart edit: beat_sync ("beats" or "bars") moves the cuts onto the music's beat after you apply the plan; captions (a text style such as "caption" or "kinetic-caption") transcribes what's said locally and writes timed captions, which stay out of "texts"; audio items take "speech": true for a voice and "duck": 0.3 for music that should dip while someone talks; the "cutout" effect removes the background behind a person or product (Vision), so set "background" or put an image beneath it. Use these when the user asks, or when they clearly make the ad better (beat sync for music-driven edits).
+- Generated media: when the user asks for something they don't have - a background image or b-roll still, a voiceover, music - make it on this Mac with generate_media (it returns the new media ids), or list it in the plan's "generate" ([{"kind": "image", "prompt": "...", "as": "g1"}, {"kind": "voiceover", "text": "the exact words", "voice": "af_heart", "as": "g2"}, {"kind": "music", "prompt": "genre, instruments, mood", "seconds": 15, "as": "g3"}]) and use "g1" as media in the same plan. Each item takes 10-60 seconds. Image prompts describe the scene (no text in it; add words as texts). A voiceover goes in audio at volume 1 with music under it at 0.25. Prefer the user's own media when they have it.
 - Every request you handle becomes a single undo step for the user.
 
 How to work
@@ -116,6 +118,18 @@ QString guidedSystemPrompt()
     ad2.insert("style", "energetic");
     ad2.insert("moments", QJsonArray{QJsonObject{{"effect", "shake"}, {"at", 4}, {"duration", 0.5}}});
 
+    // Generated media: nothing imported, the user asks for a picture, a voiceover and music.
+    QJsonObject genAd = plan("Made an 8 second bakery ad: a generated photo of fresh bread, your line as a voiceover and cheerful music under it.",
+                             "keep", {clip("g1", 0, 8)}, {},
+                             {QJsonObject{{"media", "g2"}, {"at", 0.5}, {"from", 0}, {"to", 3}, {"volume", 1}},
+                              QJsonObject{{"media", "g3"}, {"at", 0}, {"from", 0}, {"to", 8}, {"volume", 0.25}}},
+                             {text("Fresh Bread Daily", 0, 3, "headline"), text("Order now", 5, 3, "cta")});
+    genAd.insert("style", "playful");
+    genAd.insert("generate", QJsonArray{
+        QJsonObject{{"kind", "image"}, {"prompt", "fresh crusty bread loaves on a rustic bakery counter, morning light"}, {"as", "g1"}},
+        QJsonObject{{"kind", "voiceover"}, {"text", "Baked fresh every morning."}, {"voice", "af_heart"}, {"as", "g2"}},
+        QJsonObject{{"kind", "music"}, {"prompt", "cheerful acoustic guitar and light percussion, warm"}, {"seconds", 8}, {"as", "g3"}}});
+
     return QStringLiteral(R"(You are the planning engine inside Montage, a video editor. You read the user's request and answer with ONE JSON object: the edit plan. The plan describes the WHOLE video after the change. The app builds the video exactly from your plan.
 
 THE PLAN
@@ -136,6 +150,11 @@ THE PLAN
 - "style": the feel of the whole video: energetic | bold | playful | elegant | luxury | minimal.
   Set it for every ad, promo or social video, and when the user describes a mood (hype, premium, classy, clean, fun).
   The app then designs transitions, colour, cut effects and text animation to match. Keep the current style unless the user asks for a different feel.
+- "generate": ONLY when the user asks for an image, voiceover or music that is not in MEDIA. The app makes each item,
+  then your other items use it by its "as" name, like {"media": "g1"}:
+    {"kind": "image", "prompt": "what the picture shows, no text", "as": "g1"}  -> use it in "main" like a photo
+    {"kind": "voiceover", "text": "the exact words to say", "voice": "af_heart", "as": "g2"}  -> in "audio", volume 1
+    {"kind": "music", "prompt": "genre, instruments, mood", "seconds": video length, "as": "g3"}  -> in "audio", volume 0.25 under a voiceover
 - "export": true only if the user asks to export, render, save or download the video file. Otherwise false.
 - "reply": one or two short friendly sentences telling the user what you did.
 
@@ -148,18 +167,23 @@ EFFECTS - add these only when the user asks for them (the style already handles 
 - "speed" on a main clip: 0.5 = slow motion, 2 = twice as fast. That clip lasts (to - from) / speed seconds. "speed_curve": "hero" = fast, slow in the middle, fast.
 - "moments": effects on the whole picture at one time in the video: [{"effect": "flash", "at": 4, "duration": 0.3}].
   Effects: flash, shake, zoom-punch, glitch, rgb-split, white-out, fade-black, blur-in.
+- "beat_sync": "beats" moves the cuts onto the music's beat ("bars" for every bar). Use it when the user wants the edit in time with the music.
+- "captions": "caption" (or "kinetic-caption", words pop in as they are said) writes captions of what is said. Only when asked for captions or subtitles.
+- On an audio item: "duck": 0.3 makes music dip while someone talks; "speech": true marks a voice.
+- The effect "cutout" removes the background behind a person or product; set "background" to the colour that should show instead.
 
 RULES
 1. Start from CURRENT PLAN. Copy it and change ONLY what the request asks for. Keep every other clip, text and setting exactly the same.
-2. Use only media ids from the MEDIA list (m1, m2, ...). Never invent ids.
+2. Use only media ids from the MEDIA list (m1, m2, ...) and "as" names from your "generate" list. Never invent ids.
 3. "from" and "to" must stay inside the file's length. "to" must be bigger than "from".
 4. Do the math. If the user asks for a 15 second video, the main clips must add up to exactly 15 seconds.
    A clip with "speed" lasts (to - from) / speed.
 5. Texts and audio must end by the end of the video: "at" + "duration" <= video length.
 6. Files with type "audio" go only in "audio", never in "main". Video files already have their own sound.
 7. If MEDIA is empty you can still make a video from texts: leave "main" empty, set "background", and place the
-   texts one after another (each "at" = the previous "at" + "duration"). If the request needs the user's own clips,
-   photos or music, return CURRENT PLAN unchanged and ask them in "reply" to drag their files into the window.
+   texts one after another (each "at" = the previous "at" + "duration"). If the user asks for a picture, voiceover or
+   music they don't have, "generate" it. If the request needs the user's own clips or photos, return CURRENT PLAN
+   unchanged and ask them in "reply" to drag their files into the window.
    For any other impossible request, return CURRENT PLAN unchanged and explain why in "reply".
 8. Answer with the JSON object only. No other text.
 
@@ -216,6 +240,16 @@ REQUEST: make the first shot slow motion and shake the screen when the street sh
 ANSWER:
 )") + compact(ad2) + QStringLiteral(R"(
 (Slow motion doubles a clip's length, so "to" went from 4 to 2 to keep it 4 seconds and the video 12. The street shot starts at 4.)
+
+EXAMPLE 7 (media the user doesn't have)
+MEDIA:
+(no media imported yet)
+CURRENT PLAN:
+)") + compact(empty) + QStringLiteral(R"(
+REQUEST: make an 8 second ad for my bakery with a picture of fresh bread, a voiceover saying "Baked fresh every morning" and cheerful music
+ANSWER:
+)") + compact(genAd) + QStringLiteral(R"(
+(Nothing in MEDIA fits, so "generate" makes the picture g1, the voiceover g2 and the music g3; "main" and "audio" use them by name. The music sits at 0.25 under the voice.)
 )");
 }
 

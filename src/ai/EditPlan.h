@@ -12,6 +12,7 @@
 //   "overlays": [{"media": "m2", "at": 1, "from": 0, "to": 3, "position": "top-right", "scale": 0.4}],
 //   "audio":    [{"media": "m3", "at": 0, "from": 0, "to": 12, "volume": 0.3}],
 //   "texts":    [{"text": "Hello", "at": 0, "duration": 3, "style": "title", "position": "center"}],
+//   "generate": [{"kind": "image", "prompt": "candles on a table", "as": "g1"}],  (made first; see Generators.h)
 //   "export": false
 // }
 

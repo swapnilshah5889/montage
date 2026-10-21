@@ -1,8 +1,10 @@
+#include "engine/Beats.h"
 #include "AgentCli.h"
 
 #include "Agent.h"
 #include "Project.h"
 #include "ai/EditPlan.h"
+#include "ai/Generators.h"
 
 #include <QColor>
 #include <QDir>
@@ -70,6 +72,13 @@ QList<const Segment *> segmentsOn(const Draft &d, TrackRole role, bool texts)
             for (const Segment &s : t.segments)
                 if ((s.materialId == kTextMaterialId) == texts) out << &s;
     return out;
+}
+
+// How loud a clip plays while someone talks: music that ducks dips to
+// volume x duck there. "max_volume" checks this level ("quiet under the voice").
+double underSpeech(const Segment &s)
+{
+    return s.duck > 0 ? s.volume * s.duck : s.volume;
 }
 
 bool hasEffect(const Segment &s, const QString &name)
@@ -162,8 +171,8 @@ QString check(const QJsonObject &c, const Ctx &x)
         const QString name = c.value("media").toString();
         for (const Segment *s : segmentsOn(x.d, TrackRole::Audio, false)) {
             if (mediaName(x.d, *s) != name) continue;
-            if (c.contains("max_volume") && s->volume > c.value("max_volume").toDouble() + 0.001)
-                return QStringLiteral("music volume %1").arg(s->volume);
+            if (c.contains("max_volume") && underSpeech(*s) > c.value("max_volume").toDouble() + 0.001)
+                return QStringLiteral("music volume %1").arg(underSpeech(*s));
             if (c.contains("min_volume") && s->volume < c.value("min_volume").toDouble() - 0.001)
                 return QStringLiteral("music volume %1").arg(s->volume);
             if (c.value("covers_video").toBool() && (s->start > 100'000 || s->end() / 1e6 < x.length - 0.3))
@@ -233,6 +242,26 @@ QString check(const QJsonObject &c, const Ctx &x)
         }
         return QStringLiteral("no %1 clip%2").arg(c.value("slow").toBool() ? "slowed" : "sped-up", name.isEmpty() ? "" : " of " + name);
     }
+    if (type == QLatin1String("generated")) {  // media made by a local model: {"kind": "music", "max_volume": 0.3, ...}
+        const QString kind = c.value("kind").toString();
+        int n = 0;
+        for (const Track &t : x.d.tracks)
+            for (const Segment &s : t.segments) {
+                const Material *m = x.d.material(s.materialId);
+                if (!m || generatedKind(m->name) != kind) continue;
+                ++n;
+                if (c.contains("role") && roleName(t.role) != c.value("role").toString())
+                    return QStringLiteral("generated %1 is on the %2 track").arg(kind, roleName(t.role));
+                if (c.contains("max_volume") && underSpeech(s) > c.value("max_volume").toDouble() + 0.001)
+                    return QStringLiteral("generated %1 volume %2").arg(kind).arg(underSpeech(s));
+                if (c.contains("min_volume") && s.volume < c.value("min_volume").toDouble() - 0.001)
+                    return QStringLiteral("generated %1 volume %2").arg(kind).arg(s.volume);
+                if (c.value("covers_video").toBool() && (s.start > 100'000 || s.end() / 1e6 < x.length - 0.3))
+                    return QStringLiteral("generated %1 covers %2-%3s of %4s").arg(kind).arg(s.start / 1e6).arg(s.end() / 1e6).arg(x.length);
+            }
+        if (c.contains("max")) return n <= c.value("max").toInt() ? QString() : QStringLiteral("%1 generated %2 clips").arg(n).arg(kind);
+        return n > 0 ? QString() : QStringLiteral("no generated %1 on the timeline").arg(kind);
+    }
     if (type == QLatin1String("motion")) {  // a clip of this media moves (any motion or keyframes)
         const QString name = c.value("media").toString();
         for (const Track &t : x.d.tracks)
@@ -240,6 +269,44 @@ QString check(const QJsonObject &c, const Ctx &x)
                 if (mediaName(x.d, s) == name && (!s.motion.in.isEmpty() || !s.motion.out.isEmpty() || !s.motion.loop.isEmpty() || !s.keys.isEmpty()))
                     return {};
         return name + QStringLiteral(" doesn't move");
+    }
+    if (type == QLatin1String("beat_sync")) {
+        const QString want = c.value("value").toString();
+        return x.d.beatSync == want ? QString() : QStringLiteral("beat_sync is \"%1\"").arg(x.d.beatSync);
+    }
+    if (type == QLatin1String("on_beat")) {  // every cut within `tolerance` of a beat of this music
+        const QString name = c.value("media").toString();
+        const double tol = c.value("tolerance").toDouble(0.08);
+        for (const Segment *s : segmentsOn(x.d, TrackRole::Audio, false)) {
+            const Material *m = x.d.material(s->materialId);
+            if (!m || m->name != name) continue;
+            const BeatGrid g = beatGrid(*m);
+            QStringList off;
+            for (qsizetype i = 1; i < x.d.tracks[0].segments.size(); ++i) {
+                const double cut = x.d.tracks[0].segments[i].start / 1e6;
+                double best = 1e9;
+                for (double b : g.beats) best = std::min(best, std::abs(s->start / 1e6 + b - s->sourceStart / 1e6 - cut));
+                if (best > tol) off << QString::number(cut, 'f', 2);
+            }
+            return off.isEmpty() ? QString() : QStringLiteral("cuts off the beat at %1s").arg(off.join(", "));
+        }
+        return QStringLiteral("no audio track uses %1").arg(name);
+    }
+    if (type == QLatin1String("captions")) {
+        int n = 0;
+        QString said;
+        for (const Segment *s : segmentsOn(x.d, TrackRole::Overlay, true))
+            if (s->origin == QLatin1String("captions")) ++n, said += s->text.text + QLatin1Char(' ');
+        if (n < c.value("min").toInt(1)) return QStringLiteral("%1 auto captions").arg(n);
+        if (c.contains("contains") && !said.contains(c.value("contains").toString(), Qt::CaseInsensitive))
+            return QStringLiteral("captions say \"%1\"").arg(said.trimmed().left(80));
+        return {};
+    }
+    if (type == QLatin1String("duck")) {
+        const QString name = c.value("media").toString();
+        for (const Segment *s : segmentsOn(x.d, TrackRole::Audio, false))
+            if (mediaName(x.d, *s) == name) return s->duck > 0 ? QString() : QStringLiteral("%1 doesn't dip under speech").arg(name);
+        return QStringLiteral("no audio track uses %1").arg(name);
     }
     return QStringLiteral("unknown check type ") + type;
 }
@@ -270,9 +337,10 @@ int runEval(Agent &agent, Project &project, const QString &casesFile, const QStr
         return 2;
     }
     const QJsonArray cases = QJsonDocument::fromJson(f.readAll()).object().value("cases").toArray();
-    int passed = 0, total = 0;
+    int passed = 0, total = 0, skipped = 0;
     double totalSecs = 0;
     QStringList failedNames;
+    Generators generators;  // only asked whether the backends a case needs are up
     out(QStringLiteral("Model: %1 (%2, %3 mode)\n")
             .arg(agent.profileMap().value("model").toString(), agent.profileMap().value("name").toString(),
                  agent.profileMap().value("guided").toBool() ? "guided" : "agent"));
@@ -281,6 +349,15 @@ int runEval(Agent &agent, Project &project, const QString &casesFile, const QStr
         const QJsonObject c = cv.toObject();
         const QString name = c.value("name").toString();
         if (!only.isEmpty() && !name.contains(only)) continue;
+        // Cases that generate media need the local models; skip them when one is down.
+        QStringList down;
+        for (const QJsonValue &k : c.value("requires").toArray())
+            if (const QString why = generators.unavailable(k.toString()); !why.isEmpty()) down << k.toString() + ": " + why.section('\n', 0, 0);
+        if (!down.isEmpty()) {
+            ++skipped;
+            out(QStringLiteral("== %1\n  SKIP (%2)").arg(name, down.join("; ")));
+            continue;
+        }
         ++total;
         project.newProject();
         agent.newChat();
@@ -323,7 +400,8 @@ int runEval(Agent &agent, Project &project, const QString &casesFile, const QStr
             out(QStringLiteral("  result:\n") + summarize(d, MediaIndex(d)).replace('\n', "\n    "));
         }
     }
-    out(QStringLiteral("\nSCORE %1/%2 passed, %3s total").arg(passed).arg(total).arg(totalSecs, 0, 'f', 0));
+    out(QStringLiteral("\nSCORE %1/%2 passed, %3s total%4").arg(passed).arg(total).arg(totalSecs, 0, 'f', 0)
+            .arg(skipped ? QStringLiteral(", %1 skipped (backends down)").arg(skipped) : QString()));
     if (!failedNames.isEmpty()) out(QStringLiteral("failed: ") + failedNames.join(", "));
     return passed == total ? 0 : 1;
 }

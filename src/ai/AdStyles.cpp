@@ -196,6 +196,9 @@ QStringList applyAdStyle(const QJsonObject &before, const Draft &d, const MediaI
         texts[i] = o;
     }
     plan->insert("texts", texts);
+    // Music-driven edits cut on the music: beats for lively styles, whole bars for calm ones.
+    if (restyle && !plan->contains("beat_sync") && !plan->value("audio").toArray().isEmpty())
+        plan->insert("beat_sync", style == QLatin1String("elegant") || style == QLatin1String("luxury") ? "bars" : "beats");
     if (!restyle) return {};
     return {QStringLiteral("styled the edit as %1").arg(style)};
 }

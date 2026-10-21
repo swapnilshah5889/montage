@@ -4,6 +4,7 @@
 #include "AudioDecoder.h"
 #include "Effects.h"
 #include "Reframe.h"
+#include "Speech.h"
 #include "FFmpeg.h"
 #include "VideoDecoder.h"
 
@@ -268,6 +269,7 @@ Renderer::~Renderer() = default;  // out of line: EffectProcessor is incomplete 
 void Renderer::setDraft(const Draft &draft)
 {
     m_draft = draft;
+    m_speechReady = false;
 
     // Drop decoders whose segment is gone or now points at another file.
     QSet<QString> live;
@@ -634,6 +636,15 @@ void Renderer::renderAudio(qint64 startSample, int frames, float *out)
 {
     std::fill(out, out + size_t(frames) * kChannels, 0.0f);
     const qint64 endSample = startSample + frames;
+    if (!m_speechReady) {  // where someone talks, for ducking (found once per draft)
+        bool ducks = false;
+        for (const Track &t : m_draft.tracks)
+            for (const Segment &s : t.segments) ducks |= s.duck > 0;
+        m_speech = ducks ? speechSpans(m_draft) : QList<QPair<qint64, qint64>>{};
+        m_speechReady = true;
+        if (qEnvironmentVariableIsSet("MONTAGE_DEBUG"))
+            for (const auto &sp : m_speech) qInfo("speech %.2f-%.2f", sp.first / 1e6, sp.second / 1e6);
+    }
 
     for (const Track &track : m_draft.tracks) {
         for (const Segment &seg : track.segments) {
@@ -649,6 +660,22 @@ void Renderer::renderAudio(qint64 startSample, int frames, float *out)
             if (seg.speed <= 0) continue;  // freeze frames are silent
             AudioDecoder *dec = audioFor(seg, *mat);
             if (!dec) continue;
+            const bool ducked = seg.duck > 0 && !m_speech.isEmpty();
+            // Volume for a block centred on timeline sample `mid`: lower while someone speaks.
+            auto gainAt = [&](qint64 mid) {
+                if (!ducked) return float(seg.volume);
+                const double dip = duckAmount(m_speech, av_rescale(mid, AV_TIME_BASE, kSampleRate));
+                return float(seg.volume * (1 - (1 - seg.duck) * dip));
+            };
+            if (ducked && seg.speed == 1.0 && seg.curve.isEmpty()) {
+                constexpr qint64 kBlock = 512;
+                for (qint64 b = from; b < to; b += kBlock) {
+                    const qint64 n = std::min(kBlock, to - b);
+                    const qint64 srcSample = av_rescale(seg.sourceStart, kSampleRate, AV_TIME_BASE) + (b - segStart);
+                    dec->mixInto(srcSample, int(n), out + (b - startSample) * kChannels, gainAt(b + n / 2));
+                }
+                continue;
+            }
             if (seg.speed == 1.0 && seg.curve.isEmpty()) {
                 const qint64 srcSample = av_rescale(seg.sourceStart, kSampleRate, AV_TIME_BASE) + (from - segStart);
                 dec->mixInto(srcSample, int(to - from), out + (from - startSample) * kChannels, float(seg.volume));
@@ -667,13 +694,14 @@ void Renderer::renderAudio(qint64 startSample, int frames, float *out)
                 m_resample.assign(size_t(m + 1) * kChannels, 0.0f);
                 dec->mixInto(srcA, m + 1, m_resample.data(), 1.0f);
                 float *dst = out + (b - startSample) * kChannels;
+                const float gain = gainAt(b + n / 2);
                 for (qint64 i = 0; i < n; ++i) {
                     const double pos = double(i) * m / double(n);
                     const int k = int(pos);
                     const float f = float(pos - k);
                     for (int c = 0; c < kChannels; ++c) {
                         const float v = m_resample[size_t(k) * kChannels + c] * (1 - f) + m_resample[size_t(k + 1) * kChannels + c] * f;
-                        dst[i * kChannels + c] += v * float(seg.volume);
+                        dst[i * kChannels + c] += v * gain;
                     }
                 }
             }

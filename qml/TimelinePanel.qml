@@ -111,6 +111,31 @@ Rectangle {
                         }
                     }
                 }
+                FlatButton {
+                    text: Project.beatSync === "" ? "♪ Beat sync" : (Project.beatSync === "bars" ? "♪ On the bar" : "♪ On the beat")
+                    accent: Project.beatSync !== ""
+                    tip: "Move the cuts onto the music's beats"
+                    enabled: Project.duration > 0
+                    onClicked: beatMenu.popup()
+                    Menu {
+                        id: beatMenu
+                        MenuItem { text: "Cut on every beat"; onTriggered: Project.setBeatSync("beats") }
+                        MenuItem { text: "Cut on the bar"; onTriggered: Project.setBeatSync("bars") }
+                        MenuItem { text: "Off"; enabled: Project.beatSync !== ""; onTriggered: Project.setBeatSync("") }
+                    }
+                }
+                FlatButton {
+                    text: Project.captioning ? "Listening…" : "CC Captions"
+                    tip: "Caption what's said, transcribed on this Mac"
+                    enabled: Project.duration > 0 && !Project.captioning
+                    onClicked: captionMenu.popup()
+                    Menu {
+                        id: captionMenu
+                        MenuItem { text: "Captions"; onTriggered: Project.autoCaptions("caption") }
+                        MenuItem { text: "Word-by-word captions"; onTriggered: Project.autoCaptions("kinetic-caption") }
+                        MenuItem { text: "Remove captions"; onTriggered: Project.clearCaptions() }
+                    }
+                }
                 Item { Layout.fillWidth: true }
                 Label { text: "Zoom"; color: Theme.textDim; font.pixelSize: 12 }
                 Slider {
