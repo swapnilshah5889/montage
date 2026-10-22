@@ -1,0 +1,22 @@
+Montage includes the following third-party software.
+
+Qt 6 (Qt Core, Gui, Quick, QML, Quick Controls, Multimedia, Network, WebSockets)
+  The Qt Company Ltd. Licensed under the GNU Lesser General Public License v3.
+  Montage links Qt dynamically; the Qt frameworks are in Contents/Frameworks and
+  can be replaced. Source: https://download.qt.io/official_releases/qt/
+
+FFmpeg (libavformat, libavcodec, libavutil, libswscale, libswresample)
+  Copyright the FFmpeg developers. Licensed under the GNU Lesser General Public
+  License v2.1 or later. Built without GPL or non-free components
+  (configure --disable-gpl --disable-nonfree --enable-videotoolbox
+  --enable-audiotoolbox), linked dynamically from Contents/Frameworks.
+  Source: https://ffmpeg.org/releases/ (the exact version and build script are
+  in Montage's scripts/build-deps.sh).
+
+whisper.cpp and ggml (whisper-cli)
+  Copyright Georgi Gerganov and contributors. MIT License.
+  Source: https://github.com/ggml-org/whisper.cpp
+
+Models are not included. Montage's setup downloads them on request from their
+publishers (whisper: https://huggingface.co/ggerganov/whisper.cpp; language and
+vision models through Ollama), each under its own license.

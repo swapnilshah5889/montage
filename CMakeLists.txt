@@ -86,11 +86,13 @@ qt_add_qml_module(Montage
         qml/ModelSettings.qml
         qml/BrandSettings.qml
         qml/TranscriptPanel.qml
+        qml/SetupDialog.qml
     SOURCES
         src/app/Agent.h src/app/Agent.cpp
         src/app/Project.h src/app/Project.cpp
         src/app/Player.h src/app/Player.cpp
         src/app/Exporter.h src/app/Exporter.cpp
+        src/app/Setup.h src/app/Setup.cpp
         src/app/VideoSurface.h src/app/VideoSurface.cpp
 )
 

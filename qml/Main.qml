@@ -304,7 +304,54 @@ ApplicationWindow {
         }
     }
 
-    ModelSettings { id: modelSettings }
+    ModelSettings {
+        id: modelSettings
+        onSetupRequested: { close(); setupDialog.open() }
+    }
+    SetupDialog { id: setupDialog }
+    // First launch: show what the local AI needs (after any recovery question).
+    Timer {
+        running: !Setup.seen
+        interval: 600
+        onTriggered: if (Project.recovery.name === undefined) setupDialog.open()
+    }
+
+    // Offered when the last session didn't close properly.
+    Popup {
+        id: recoveryDialog
+        objectName: "recoveryDialog"
+        modal: true
+        closePolicy: Popup.NoAutoClose
+        anchors.centerIn: Overlay.overlay
+        width: 420
+        padding: 22
+        visible: Project.recovery.name !== undefined
+        background: Rectangle { color: Theme.panel; radius: 10; border.color: Theme.border }
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 12
+            Label { text: "Restore your last edit?"; font.pixelSize: 16; font.bold: true; color: Theme.text }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Theme.textDim
+                text: {
+                    const r = Project.recovery
+                    const when = r.minutes === undefined || r.minutes < 0 ? "recently"
+                               : r.minutes < 1 ? "less than a minute ago"
+                               : r.minutes < 120 ? r.minutes + " minute" + (r.minutes === 1 ? "" : "s") + " ago"
+                               : Math.round(r.minutes / 60) + " hours ago"
+                    return "Montage closed before \"" + (r.name || "Untitled") + "\" was saved. An autosaved copy from " + when + " is available."
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                FlatButton { text: "Discard"; onClicked: Project.discardRecovery() }
+                FlatButton { text: "Restore"; accent: true; onClicked: Project.restoreRecovery() }
+            }
+        }
+    }
     BrandSettings { id: brandSettings }
 
     Popup {

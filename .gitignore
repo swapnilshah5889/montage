@@ -1,3 +1,6 @@
 build/
 .DS_Store
 tests/media/
+deps/
+dist/
+build-release/

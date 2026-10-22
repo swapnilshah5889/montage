@@ -10,6 +10,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <cstdio>
 
@@ -59,6 +60,38 @@ static void sceneTests(const QDir &media)
     const auto w = x.shots[0].bestWindow(2'000'000);
     CHECK(w.first >= 0 && w.second <= 3'000'000 && w.second - w.first == 2'000'000);
     CHECK(cachedSceneIndex(m).shots.size() == 4);  // cached
+}
+
+// Autosave and crash recovery (in Qt's test-mode folders, not the user's).
+static void recoveryTests(const QDir &media)
+{
+    QStandardPaths::setTestModeEnabled(true);
+    QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/Recovery").removeRecursively();
+    QString recoveredPath;
+    {
+        Project a(nullptr);
+        a.enableAutosave();
+        CHECK(a.recovery().isEmpty());
+        a.importFiles({QUrl::fromLocalFile(media.filePath("clipA.mp4"))});
+        a.addToTimeline(materialId(a, "clipA.mp4"));
+        a.autosaveNow();  // the timer's job
+        // The app "crashes" here: no endSession().
+    }
+    {
+        Project b(nullptr);
+        b.enableAutosave();
+        CHECK(!b.recovery().isEmpty() && b.recovery().value("minutes").toInt() <= 1);
+        b.autosaveNow();  // doesn't overwrite the copy while it's being offered
+        b.restoreRecovery();
+        CHECK(b.recovery().isEmpty() && b.draft().tracks[0].segments.size() == 1 && b.dirty());
+        b.endSession();  // a normal quit clears it
+    }
+    {
+        Project c(nullptr);
+        c.enableAutosave();
+        CHECK(c.recovery().isEmpty());
+    }
+    QStandardPaths::setTestModeEnabled(false);
 }
 
 // Text-based editing on talk.mp4 ("Hi, I'm Sam. Um, our bread is, uh, baked fresh
@@ -404,6 +437,7 @@ int main(int argc, char **argv)
     smartTests(media);
     sceneTests(media);
     textEditTests(media);
+    recoveryTests(media);
 
     std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "all project tests passed", failures,
                 failures == 1 ? "" : "s");

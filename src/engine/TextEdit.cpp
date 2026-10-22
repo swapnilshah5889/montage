@@ -229,11 +229,13 @@ qint64 cutTimeline(Draft &d, qint64 t0, qint64 t1)
             const qint64 len = s.duration;
             QList<Segment> &list = d.mainTrack().segments;
             list.removeIf([&](const Segment &x) { return x.id == s.id; });
-            for (Track &t : d.tracks)
-                if (t.role == TrackRole::Overlay)
-                    for (Segment &o : t.segments)
-                        if (o.start >= s.end()) o.start -= len;
-                        else if (o.start > s.start) o.start = s.start;
+            for (Track &t : d.tracks) {
+                if (t.role != TrackRole::Overlay) continue;
+                for (Segment &o : t.segments) {
+                    if (o.start >= s.end()) o.start -= len;
+                    else if (o.start > s.start) o.start = s.start;
+                }
+            }
             d.normalize();
             total += len;
             continue;

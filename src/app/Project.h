@@ -3,6 +3,7 @@
 #include "model/Draft.h"
 
 #include <QObject>
+#include <QTimer>
 #include <QQmlEngine>
 #include <QUrl>
 #include <QVariant>
@@ -34,6 +35,8 @@ class Project : public QObject
     Q_PROPERTY(bool captioning READ captioning NOTIFY captioningChanged)
     // What's said on the main track, word by word, for the transcript panel.
     Q_PROPERTY(QVariantList transcript READ transcript NOTIFY changed)
+    // An edit left over from a session that didn't close properly: {name, minutes, file}; empty when none.
+    Q_PROPERTY(QVariantMap recovery READ recovery NOTIFY recoveryChanged)
 
 public:
     // Not default-constructible on purpose: QML would otherwise build its
@@ -114,6 +117,15 @@ public:
     Q_INVOKABLE void autoCaptions(const QString &style);
     Q_INVOKABLE void clearCaptions();
 
+    // Crash recovery. The app turns autosave on (every 20 s while there are
+    // unsaved changes); a normal quit or save removes the recovery copy.
+    void enableAutosave();
+    void endSession();
+    QVariantMap recovery() const { return m_recovery; }
+    Q_INVOKABLE void restoreRecovery();
+    Q_INVOKABLE void discardRecovery();
+    Q_INVOKABLE void autosaveNow();
+
     // Text-based editing.
     QVariantList transcript() const;
     // Cuts [start, end) out of the main track (words selected in the transcript).
@@ -163,6 +175,7 @@ signals:
     void selectionChanged();
     void message(const QString &text);
     void captioningChanged();
+    void recoveryChanged();
 
 private:
     template <typename F>
@@ -184,6 +197,9 @@ private:
     QUrl m_file;
     bool m_dirty = false;
     QString m_thumbDir;
+    QString m_recoveryFile;
+    QVariantMap m_recovery;
+    QTimer *m_autosave = nullptr;
 
     static inline Project *s_instance = nullptr;
 };

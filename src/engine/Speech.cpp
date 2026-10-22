@@ -3,6 +3,7 @@
 #include "AudioDecoder.h"
 #include "FFmpeg.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -72,6 +73,9 @@ QList<QPair<qint64, qint64>> merged(QList<QPair<qint64, qint64>> spans, qint64 g
 QString whisperBinary()
 {
     if (const QString env = qEnvironmentVariable("MONTAGE_WHISPER"); !env.isEmpty()) return env;
+    // The one shipped inside Montage.app, then any installed one.
+    if (const QString bundled = QCoreApplication::applicationDirPath() + QStringLiteral("/whisper-cli"); QFileInfo(bundled).isExecutable())
+        return bundled;
     QString bin = QStandardPaths::findExecutable(QStringLiteral("whisper-cli"));
     if (bin.isEmpty())  // apps started from the Dock don't get Homebrew's PATH
         bin = QStandardPaths::findExecutable(QStringLiteral("whisper-cli"), {QStringLiteral("/opt/homebrew/bin"), QStringLiteral("/usr/local/bin")});
@@ -80,12 +84,16 @@ QString whisperBinary()
 
 QString whisperModel()
 {
-    if (const QString env = qEnvironmentVariable("MONTAGE_WHISPER_MODEL"); !env.isEmpty()) return env;
-    const QDir dir(QDir::homePath() + QStringLiteral("/ai-studio/models/whisper"));
-    for (const char *name : {"ggml-small.bin", "ggml-base.bin", "ggml-small.en.bin", "ggml-base.en.bin"})
-        if (dir.exists(QLatin1String(name))) return dir.filePath(QLatin1String(name));
-    const QStringList any = dir.entryList({QStringLiteral("ggml-*.bin")}, QDir::Files, QDir::Size);
-    return any.isEmpty() ? QString() : dir.filePath(any.first());
+    if (const QString env = qEnvironmentVariable("MONTAGE_WHISPER_MODEL"); !env.isEmpty() && QFileInfo::exists(env)) return env;
+    // Montage's own models folder (the setup downloads there), then ~/ai-studio.
+    for (const QString &path : {whisperModelDir(), QDir::homePath() + QStringLiteral("/ai-studio/models/whisper")}) {
+        const QDir dir(path);
+        for (const char *name : {"ggml-small.bin", "ggml-base.bin", "ggml-small.en.bin", "ggml-base.en.bin"})
+            if (dir.exists(QLatin1String(name))) return dir.filePath(QLatin1String(name));
+        const QStringList any = dir.entryList({QStringLiteral("ggml-*.bin")}, QDir::Files, QDir::Size);
+        if (!any.isEmpty()) return dir.filePath(any.first());
+    }
+    return {};
 }
 
 bool writeWav16k(const std::vector<float> &x, const QString &path)
@@ -215,6 +223,16 @@ double duckAmount(const QList<QPair<qint64, qint64>> &spans, qint64 t)
     }
     a = std::clamp(a, 0.0, 1.0);
     return a * a * (3 - 2 * a);
+}
+
+QString whisperModelDir()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/models/whisper");
+}
+
+QString whisperModelPath()
+{
+    return whisperModel();
 }
 
 QString whisperProblem()
