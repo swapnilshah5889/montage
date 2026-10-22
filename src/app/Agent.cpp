@@ -430,6 +430,21 @@ void Agent::ensureProvider()
     m_provider->setProfile(m_profile, apiKeyFor(m_profile));
 }
 
+QString Agent::friendlyError(const QString &error) const
+{
+    // A local model server that isn't running is the common case: say what to do.
+    const bool unreachable = error.contains(QLatin1String("refused"), Qt::CaseInsensitive)
+                             || error.contains(QLatin1String("not found"), Qt::CaseInsensitive)
+                             || error.contains(QLatin1String("timed out"), Qt::CaseInsensitive)
+                             || error.contains(QLatin1String("Host"), Qt::CaseInsensitive);
+    if (unreachable && m_profile.local())
+        return QStringLiteral("Can't reach %1 at %2. Open the Ollama app (or run \"ollama serve\"), then try again. "
+                              "⚙ → Set up shows what's missing.").arg(m_profile.name, m_profile.baseUrl);
+    if (error.contains(QLatin1String("model"), Qt::CaseInsensitive) && error.contains(QLatin1String("not found"), Qt::CaseInsensitive))
+        return QStringLiteral("%1 isn't installed. Download it from ⚙ → Set up.").arg(m_profile.model);
+    return error;
+}
+
 QString Agent::mediaStatus() const
 {
     return m_indexer->status();
@@ -551,7 +566,7 @@ void Agent::onTurnFinished(const TurnResult &r)
 
     switch (r.stop) {
     case StopReason::Error:
-        m_chat->add("error", r.error);
+        m_chat->add("error", friendlyError(r.error));
         m_conversationStarted = false;
         finish(false, {});
         return;
@@ -641,7 +656,7 @@ void Agent::onPlan(const QJsonObject &modelPlan, const QString &raw, const QStri
     if (!raw.isEmpty()) m_lastRaw = raw;
     if (!error.isEmpty()) {
         if (raw.isEmpty()) {  // the request itself failed
-            m_chat->add("error", error);
+            m_chat->add("error", friendlyError(error));
             finish(false, {});
             return;
         }

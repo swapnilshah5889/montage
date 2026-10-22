@@ -84,6 +84,8 @@ public:
     QVariantMap brand() const;
     // "Watching your clips (2 of 5)" while the scene index is being built.
     QString mediaStatus() const;
+    // Provider errors in words people can act on ("Ollama isn't running...").
+    QString friendlyError(const QString &error) const;
     // Blocks (running the event loop) until every imported clip is indexed,
     // or `timeoutMs` passes. For scripted runs and evals.
     bool waitForMedia(int timeoutMs);

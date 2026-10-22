@@ -14,6 +14,7 @@ Popup {
     padding: 0
     background: Rectangle { color: Theme.panel; radius: 12; border.color: Theme.border }
 
+    signal setupRequested
     property string selectedId: Agent.profileId
     property var form: ({})
     property var fetched: []
@@ -52,7 +53,11 @@ Popup {
                 anchors.fill: parent
                 anchors.margins: 12
                 spacing: 6
-                Label { text: "Models"; font.bold: true; font.pixelSize: 14; color: Theme.text }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Label { text: "Models"; font.bold: true; font.pixelSize: 14; color: Theme.text; Layout.fillWidth: true }
+                    FlatButton { text: "Set up…"; tip: "Check and download the local AI pieces"; onClicked: popup.setupRequested() }
+                }
                 ListView {
                     Layout.fillWidth: true
                     Layout.fillHeight: true

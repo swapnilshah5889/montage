@@ -44,6 +44,10 @@ struct Line {
     int firstWord = 0, lastWord = 0;
 };
 
+// Where Montage keeps whisper models it downloads, and the model in use (empty if none).
+QString whisperModelDir();
+QString whisperModelPath();
+
 // Why captions can't be made ("install whisper-cpp with Homebrew..."), or
 // empty when whisper and a model are available.
 QString whisperProblem();

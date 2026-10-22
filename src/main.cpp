@@ -3,6 +3,7 @@
 #include "app/Exporter.h"
 #include "app/Player.h"
 #include "app/Project.h"
+#include "app/Setup.h"
 #include "engine/Beats.h"
 #include "engine/Scenes.h"
 #include "engine/Speech.h"
@@ -28,6 +29,8 @@
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QKeyEvent>
+#include <QPainter>
+#include <QPainterPath>
 #include <QQuickItem>
 #include <QTimer>
 #include <cstdio>
@@ -93,10 +96,11 @@ int main(int argc, char *argv[])
     const QCommandLineOption describeOpt("describe", "With --scenes: also describe each shot with the local vision model.");
     const QCommandLineOption transcriptOpt("transcript", "Print what's said in a file (lines and fillers), then quit.", "file");
     const QCommandLineOption cleanOpt("clean-speech", "Cut fillers (um, uh) and long pauses from the project's clips before saving or exporting.");
+    const QCommandLineOption iconOpt("render-icon", "Draw the app icon (1024 px PNG), then quit.", "png");
     const QCommandLineOption beatsOpt("beats", "Print the beat grid of an audio or video file, then quit.", "file");
     const QCommandLineOption formatsOpt("formats", "With --export: one file per shape, e.g. 9:16,1:1,16:9.", "shapes");
     const QCommandLineOption openUiOpt("ui-open", "Open popups / check controls by objectName (comma-separated) once the window is up.", "names");
-    cli.addOptions({typeOpt, waitOpt, quitOpt, frameOpt, frameOutOpt, planOpt, openUiOpt, formatsOpt, beatsOpt, scenesOpt, describeOpt, transcriptOpt, cleanOpt});
+    cli.addOptions({typeOpt, waitOpt, quitOpt, frameOpt, frameOutOpt, planOpt, openUiOpt, formatsOpt, beatsOpt, scenesOpt, describeOpt, transcriptOpt, cleanOpt, iconOpt});
     cli.addOptions({openOpt, importOpt, overlayOpt, saveOpt, exportOpt, shotOpt, seekOpt, selectOpt, playOpt, textOpt,
                     profileOpt, agentOpt, evalOpt, mediaOpt, onlyOpt});
     cli.process(app);
@@ -105,6 +109,7 @@ int main(int argc, char *argv[])
     Player player(&project);
     Exporter exporter(&project);
     Agent agent(&project, &exporter, &app);
+    Setup setup(&agent, &app);
     if (cli.isSet(scenesOpt)) {
         mtg::Material m;
         QString err;
@@ -133,6 +138,42 @@ int main(int argc, char *argv[])
                         s.description.isEmpty() ? "" : qPrintable(QStringLiteral(" | \"%1\" %2 appeal %3").arg(s.description, s.framing).arg(s.appeal)));
         }
         return x.isEmpty() ? 1 : 0;
+    }
+    if (cli.isSet(iconOpt)) {
+        // macOS app icon: a rounded tile (824 px in a 1024 canvas, Apple's grid),
+        // teal to indigo, with a film strip's sprocket edges and a play triangle.
+        QImage img(1024, 1024, QImage::Format_ARGB32_Premultiplied);
+        img.fill(Qt::transparent);
+        QPainter p(&img);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QRectF tile(100, 100, 824, 824);
+        QPainterPath shape;
+        shape.addRoundedRect(tile, 185, 185);
+        p.fillPath(shape.translated(0, 12), QColor(0, 0, 0, 70));  // soft drop shadow
+        QLinearGradient g(tile.topLeft(), tile.bottomRight());
+        g.setColorAt(0, QColor("#1FD1C1"));
+        g.setColorAt(1, QColor("#3B3FD8"));
+        p.fillPath(shape, g);
+        p.setClipPath(shape);
+        // Sprocket holes down both sides.
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(255, 255, 255, 60));
+        for (int i = 0; i < 6; ++i) {
+            const double y = 190 + i * 118;
+            p.drawRoundedRect(QRectF(150, y, 56, 72), 14, 14);
+            p.drawRoundedRect(QRectF(818, y, 56, 72), 14, 14);
+        }
+        // Play triangle with rounded corners.
+        QPainterPath play;
+        play.moveTo(430, 330);
+        play.lineTo(430, 694);
+        play.lineTo(720, 512);
+        play.closeSubpath();
+        p.setBrush(Qt::white);
+        p.setPen(QPen(Qt::white, 70, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.drawPath(play);
+        p.end();
+        return img.save(cli.value(iconOpt)) ? 0 : 1;
     }
     if (cli.isSet(transcriptOpt)) {
         mtg::Material m;
@@ -263,6 +304,10 @@ int main(int argc, char *argv[])
     if (cli.isSet(seekOpt)) player.seek(qint64(cli.value(seekOpt).toDouble() * 1e6));
     if (cli.isSet(selectOpt) && !project.draft().tracks[0].segments.isEmpty())
         project.setSelectedId(project.draft().tracks[0].segments.first().id);
+
+    // Interactive session: autosave for crash recovery, cleared on a normal quit.
+    project.enableAutosave();
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &project, &Project::endSession);
 
     QQmlApplicationEngine engine;
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,

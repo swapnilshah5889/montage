@@ -13,6 +13,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QSaveFile>
+#include <QDateTime>
 #include <QSet>
 #include <QThread>
 #include <QSize>
@@ -134,6 +136,67 @@ Project::Project(QObject *parent)
 {
     s_instance = this;
     m_thumbDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/thumbs");
+    m_recoveryFile = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/Recovery/session.montage");
+}
+
+void Project::enableAutosave()
+{
+    // A copy left behind means the last session didn't end normally: offer it back.
+    if (QFile f(m_recoveryFile); f.open(QIODevice::ReadOnly)) {
+        const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+        const QJsonObject meta = o.value("recovery").toObject();
+        const QDateTime saved = QDateTime::fromString(meta.value("saved").toString(), Qt::ISODate);
+        if (o.value("format").toString() == QLatin1String("montage-draft")) {
+            m_recovery = QVariantMap{{"name", o.value("name").toString()},
+                                     {"minutes", saved.isValid() ? int(saved.secsTo(QDateTime::currentDateTime()) / 60) : -1},
+                                     {"file", meta.value("file").toString()}};
+            emit recoveryChanged();
+        }
+    }
+    if (m_autosave) return;
+    m_autosave = new QTimer(this);
+    m_autosave->setInterval(20'000);
+    connect(m_autosave, &QTimer::timeout, this, &Project::autosaveNow);
+    m_autosave->start();
+}
+
+void Project::autosaveNow()
+{
+    // Nothing worth keeping, or a recovery offer still open (don't overwrite it).
+    if (!m_dirty || !m_recovery.isEmpty() || (m_draft.duration() <= 0 && m_draft.materials.isEmpty())) return;
+    QDir().mkpath(QFileInfo(m_recoveryFile).absolutePath());
+    QJsonObject o = m_draft.toJson();
+    o.insert("recovery", QJsonObject{{"file", m_file.toString()}, {"saved", QDateTime::currentDateTime().toString(Qt::ISODate)}});
+    QSaveFile f(m_recoveryFile);  // written whole or not at all
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+        f.commit();
+    }
+}
+
+void Project::endSession()
+{
+    if (m_recovery.isEmpty()) QFile::remove(m_recoveryFile);  // an unanswered offer stays for next time
+}
+
+void Project::restoreRecovery()
+{
+    if (m_recovery.isEmpty()) return;
+    const QString original = m_recovery.value("file").toString();
+    m_recovery.clear();
+    emit recoveryChanged();
+    if (!load(QUrl::fromLocalFile(m_recoveryFile))) return;
+    m_file = QUrl(original);
+    m_dirty = true;  // restored, not saved yet
+    emit changed();
+    emit message(QStringLiteral("Restored your edit"));
+}
+
+void Project::discardRecovery()
+{
+    m_recovery.clear();
+    emit recoveryChanged();
+    QFile::remove(m_recoveryFile);
 }
 
 Project *Project::create(QQmlEngine *, QJSEngine *)
@@ -1102,6 +1165,7 @@ bool Project::save(const QUrl &url)
     f.write(QJsonDocument(m_draft.toJson()).toJson(QJsonDocument::Indented));
     m_file = target;
     m_dirty = false;
+    if (m_autosave && m_recovery.isEmpty()) QFile::remove(m_recoveryFile);  // saved: nothing to recover
     emit changed();
     return true;
 }

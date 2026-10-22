@@ -7,6 +7,20 @@ for how CapCut is put together and which parts we rebuilt on open components.
 
 All code here is original. No CapCut code, libraries, effects or assets are used.
 
+## Install
+
+Open `Montage-<version>.dmg` and drag Montage to Applications. On first launch Montage
+shows **Set up Montage's AI**, which checks what's on this Mac and gets the rest with one
+click each: Ollama (needed; links to its installer), the assistant model (`qwen2.5:7b`,
+pulled through Ollama with progress), the vision model, and the whisper speech model
+(downloaded into Montage's own folder). Image, voice and music generation (ComfyUI,
+Kokoro, ACE-Step) are optional and link to their install steps. Reopen it any time from
+the assistant's ⚙ settings → **Set up…**.
+
+The DMG needs macOS 26 or later, because Homebrew's Qt is built for the macOS it was
+compiled on. Building against Qt from the official Qt installer, which targets older
+macOS releases, would lower it to macOS 14, the minimum FFmpeg and whisper are built for.
+
 Montage is AI-native: you describe the video you want in a chat panel and an
 assistant edits the timeline for you. It works with any model: Claude, OpenAI,
 DeepSeek, OpenRouter, or local models through Ollama or LM Studio.
@@ -174,6 +188,8 @@ server; agent mode hasn't been scored against a live hosted model yet.
   attention saliency, tracked across the clip and smoothed). Per clip: Auto, Fill, Fit, or Fit
   with a blurred fill. Logos and other cut-out graphics stay whole.
 - Projects saved as JSON (`.montage`)
+- Autosave and crash recovery: unsaved work is written to a recovery file every 20 seconds;
+  after a crash or force quit Montage offers to restore it on the next launch
 - Text and titles: presets (title, subtitle, caption, lower third, end card, and for ads
   headline, badge, price, CTA button, kinetic caption), shapes (pill, burst, tag, ribbon,
   circle, underline, rounded), shadow, gradient, size, colour, outline, box, alignment
@@ -198,17 +214,17 @@ server; agent mode hasn't been scored against a live hosted model yet.
 brew install qt ffmpeg cmake ninja
 ```
 
-Captions need whisper.cpp and a model (any `ggml-*.bin`; `small` is a good default):
+Captions need whisper.cpp and a model (any `ggml-*.bin`; `small` is a good default). The
+packaged app carries its own `whisper-cli`; for a development build, install it:
 
 ```bash
 brew install whisper-cpp
 ```
 
-```bash
-mkdir -p ~/ai-studio/models/whisper && curl -L -o ~/ai-studio/models/whisper/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
-```
-
-`MONTAGE_WHISPER` and `MONTAGE_WHISPER_MODEL` point at another binary or model.
+The model can be downloaded from the setup window (⚙ → **Set up…**). It is saved in
+`~/Library/Application Support/Montage/Montage/models/whisper`. Montage also looks in
+`~/ai-studio/models/whisper`. `MONTAGE_WHISPER` and `MONTAGE_WHISPER_MODEL` point at
+another binary or model.
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
@@ -221,6 +237,39 @@ cmake --build build
 ```bash
 open build/Montage.app
 ```
+
+## Package
+
+`scripts/package.sh` builds `dist/Montage.app` and `dist/Montage-<version>.dmg`:
+
+```bash
+scripts/package.sh
+```
+
+The first run calls `scripts/build-deps.sh` (about ten minutes), which builds into `deps/`:
+
+- FFmpeg 9 as LGPL shared libraries: FFmpeg's own codecs plus VideoToolbox and
+  AudioToolbox, with no GPL parts, so the app can be distributed;
+- `whisper-cli` 1.9.5 as one static binary with Metal.
+
+The script then bundles Qt with `macdeployqt`, drops Qt plugins Montage doesn't use, and
+checks that nothing loads from outside the bundle except macOS itself. It also draws the
+icon and writes the license notices (`packaging/THIRD_PARTY_NOTICES.txt`). Finally it
+signs the app ad hoc. That runs on this Mac; on another Mac it opens after right-click →
+Open.
+
+To distribute the app, sign it with a Developer ID and notarize it. This needs an Apple
+Developer account; `scripts/notarize.sh` lists the one-time setup.
+
+```bash
+scripts/notarize.sh "Developer ID Application: Your Name (TEAMID)"
+```
+
+It signs every library, framework and tool inside out with the hardened runtime
+(entitlements in `packaging/Montage.entitlements`). It then notarizes and staples the
+app, rebuilds the DMG, and notarizes and staples that too.
+`scripts/notarize.sh -` signs ad hoc with the hardened runtime and starts the app, to
+check it still runs that way without an account.
 
 ## Command line
 
@@ -256,7 +305,8 @@ tests/make_media.sh
 
 `project_test` drives the editing model (split, move, trim, track placement, text clips,
 undo groups, live slider edits, save/load) against real media files, plus beat tracking,
-cutting to the beat, ducking spans and captions (skipped without whisper.cpp):
+cutting to the beat, ducking spans, captions (skipped without whisper.cpp), and autosave
+with crash recovery:
 
 ```bash
 build/project_test tests/media
@@ -291,6 +341,8 @@ build/plan_test
 | `src/engine/Scenes.*`, `src/ai/MediaIndexer.*` | Scene index: shots, quality, Vision labels, vision-model descriptions | CapCut's smart scene / highlight features |
 | `src/engine/Beats.*`, `Speech.*`, `src/ai/Finishing.*` | Beat tracking and cut-to-the-beat, speech spans and ducking, whisper.cpp captions | CapCut's beat / auto-caption features |
 | `src/app/Agent.*` | Agent loop, guided planner, chat transcript, model profiles | - |
+| `src/app/Setup.*`, `qml/SetupDialog.qml` | First-run setup: checks and downloads for the local models | - |
+| `scripts/build-deps.sh`, `package.sh`, `notarize.sh`, `packaging/` | LGPL FFmpeg and whisper builds, app bundle and DMG, signing | - |
 | `qml/` | UI: chat, media, player, inspector, timeline | `TimeLine`, `Player`, `MaterialPanel`, `FunctionPanel` QML modules |
 
 ## Known gaps and next steps
@@ -307,4 +359,7 @@ build/plan_test
   long shot isn't described beat by beat; a 20-minute file takes a few minutes to describe.
 - The background-removal mask is computed per frame (fine for stills and short clips; long
   videos preview slowly with it on).
-- Shipping: build an LGPL-only FFmpeg and link it dynamically, run `macdeployqt`, then sign and notarize.
+- The DMG is signed ad hoc until `scripts/notarize.sh` runs with a Developer ID, and needs
+  macOS 26 while it is built against Homebrew's Qt (see Install).
+- Setup links to Ollama's installer rather than installing it, since Ollama is an app of its own.
+- Recovery keeps one session: the project open when Montage quit unexpectedly.
