@@ -40,6 +40,7 @@ How the editor works
 - The whole timeline is described by an edit plan (JSON, times in seconds, media ids like "m1"). apply_plan replaces the timeline with the plan you pass, so to change anything you take the current plan, modify it, and pass the complete result.
 - main: clips that play back to back with no gaps; "from"/"to" are seconds inside the file. For photos, "to" is how long to show it.
 - The media list includes each video's shots from the scene index: what each shows, framing, people, and which are blurry, shaky or the best. Choose footage by what it shows. A main or overlay item can name a shot instead of exact seconds - "shot": 2 (the second shot of that file) or "moment": "dog running" - and the app sets "from"/"to" to the sharpest, steadiest stretch of the item's length (from/to then only give the length). find_moments searches every file's shots by description.
+- For clips with speech the media list also shows what's said, as numbered lines (transcribed locally with word timing). Edit by what's said: a main item with "line": N or "lines": [a, b] (or "says": "words") plays exactly that speech; "cut_lines": [N, ...] takes lines out of a clip (the plan then shows it with "skips": source ranges left out - keep those as they are); "clean_speech": true cuts ums, uhs and long pauses from every talking clip. Use these for interviews, testimonials and talking-head ads: build the story from the strongest lines, in whatever order works best.
 - overlays: pictures shown on top (picture-in-picture) from timeline time "at", with a named position and a scale (0.4 = 40% of the screen).
 - audio: music or sound starting at timeline time "at". Volume 1 is normal; 0.25-0.4 sits music under speech.
 - texts: on-screen text with a style: title (big, centred), subtitle, caption (bottom, on a dark box), lower-third (name/role label), end-card. Optional color (#RRGGBB), position, size (fraction of screen height).
@@ -135,6 +136,16 @@ QString guidedSystemPrompt()
         "m1  video  trip.mp4  20s  1920x1080  sound\n"
         "    shots: 1) 0-6s people hiking up a rocky trail (wide, best); 2) 6-12s boots on the path (close-up, blurry); "
         "3) 12-20s friends around a campfire at night (medium, 3 people)");
+    const QString mediaTalk = QStringLiteral(
+        "m1  video  interview.mp4  25s  1920x1080  sound\n"
+        "    says: 1) 0.4-2.1s \"Hi, I'm Priya from Bloom Bakery.\"; 2) 2.8-6s \"We bake everything fresh before sunrise.\"; "
+        "3) 6.6-9.3s \"Our sourdough takes two days to make.\"; 4) 10.1-12s \"Come visit us on Main Street.\"");
+    QJsonObject sour = clip("m1", 6.6, 9.3), visit = clip("m1", 10.1, 12);
+    sour.insert("line", 3);
+    visit.insert("line", 4);
+    QJsonObject talkPlan = plan("Made a short clip: the sourdough line, then the invitation to visit, without the ums.", "keep",
+                                {sour, visit}, {}, {}, {});
+    talkPlan.insert("clean_speech", true);
     QJsonObject hike = clip("m1", 0, 3), fire = clip("m1", 0, 3);
     hike.insert("shot", 1);
     fire.insert("shot", 3);
@@ -153,6 +164,9 @@ THE PLAN
 - MEDIA lists the shots inside each video (what they show; blurry, shaky and best). To use a shot, add "shot": its number,
   and "from"/"to" then only set the length: {"media": "m1", "shot": 2, "from": 0, "to": 3} uses the best 3 seconds of shot 2.
   Pick shots by what they show; prefer "best" and avoid "blurry" and "shaky" ones.
+- MEDIA lists what people say in clips with speech, as numbered lines ("says: 1) ..."). To use a line, add "line": its
+  number (or "lines": [first, last]); the app cuts exactly that speech. To take lines out of a clip, add "cut_lines": [numbers].
+  "clean_speech": true cuts the ums, uhs and long pauses from talking clips.
 - "audio": music or sound. "at" = when it starts in the video. "from"/"to" = which part of the file. "volume": 1 normal, 0.3 quiet background.
 - "texts": words on screen. "at" = when it appears in the video, "duration" = how long, "style" = title | subtitle | caption | lower-third | end-card,
   or for ads: headline (big bold hook) | badge ("NEW", "30% OFF") | price ("$49") | cta (a button: "Shop now") | kinetic-caption (words pop in one by one).
@@ -273,6 +287,16 @@ REQUEST: make a 6 second video of the hike and the campfire
 ANSWER:
 )") + compact(shotsPlan) + QStringLiteral(R"(
 (Shots chosen by what they show: shot 1 is the hike, shot 3 the campfire; shot 2 is blurry. The app finds the best 3 seconds of each.)
+
+EXAMPLE 9 (editing by what's said)
+MEDIA:
+)") + mediaTalk + QStringLiteral(R"(
+CURRENT PLAN:
+)") + compact(empty) + QStringLiteral(R"(
+REQUEST: make a short clip with the sourdough line, then the one about visiting us, and remove the ums
+ANSWER:
+)") + compact(talkPlan) + QStringLiteral(R"(
+(Lines picked by what is said: line 3 is the sourdough, line 4 the visit. The app cuts each line exactly and removes the ums.)
 )");
 }
 

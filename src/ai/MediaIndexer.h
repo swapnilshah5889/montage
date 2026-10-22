@@ -57,13 +57,15 @@ private:
     void next();
     void describeNext();
     void pickModel(const std::function<void()> &then);
+    void transcribe(const std::function<void()> &then);  // whole-file transcript for clips with sound
+    static bool wantsTranscript(const Material &m);
 
     VisionConfig m_config;
     QNetworkAccessManager *m_net;
     QList<Job> m_queue;
     QHash<QString, bool> m_seen;  // path -> fully done
     Job m_job;
-    int m_current = -1;  // 0 = analysing shots, 1 = describing
+    int m_current = -1;  // 0 = analysing shots, 1 = describing, 2 = transcribing
     int m_done = 0, m_total = 0;
     bool m_paused = false;
     bool m_modelChecked = false;

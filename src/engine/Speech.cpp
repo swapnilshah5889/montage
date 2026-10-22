@@ -14,6 +14,7 @@
 #include <QMutex>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <algorithm>
@@ -27,6 +28,7 @@ namespace {
 QMutex g_mutex;
 QHash<QString, QList<QPair<qint64, qint64>>> g_spans;
 QHash<QString, Transcript> g_transcripts;
+QHash<QString, QList<float>> g_loudness;
 
 QString fileKey(const Material &m)
 {
@@ -225,22 +227,11 @@ QString whisperProblem()
     return {};
 }
 
-Transcript transcribe(const Material &m, qint64 from, qint64 to)
-{
-    to = std::min(to, m.durationUs > 0 ? m.durationUs : to);
-    const QString key = fileKey(m) + QStringLiteral("|%1|%2|%3").arg(from).arg(to).arg(QFileInfo(whisperModel()).fileName());
-    {
-        QMutexLocker lock(&g_mutex);
-        if (auto it = g_transcripts.constFind(key); it != g_transcripts.cend()) return *it;
-    }
-    const QString cached = cachePath(key);
-    if (QFile f(cached); f.open(QIODevice::ReadOnly)) {
-        const Transcript t = fromJson(QJsonDocument::fromJson(f.readAll()).object());
-        QMutexLocker lock(&g_mutex);
-        g_transcripts.insert(key, t);
-        return t;
-    }
+namespace {
 
+// Runs whisper over [from, to) of a file. Blocking.
+Transcript runWhisper(const Material &m, qint64 from, qint64 to)
+{
     Transcript out;
     if (const QString problem = whisperProblem(); !problem.isEmpty()) {
         out.error = problem;
@@ -253,11 +244,21 @@ Transcript transcribe(const Material &m, qint64 from, qint64 to)
         out.error = QStringLiteral("Couldn't read the audio of %1.").arg(m.name);
         return out;
     }
+    // A verbatim-style prompt keeps fillers ("um", "uh") in the transcript so
+    // they can be cut, and keeps whisper from wrapping lines in quotes.
+    // Token timestamps from DTW alignment are far closer to the audio than the
+    // decoder's own word offsets (which run up to half a second early); DTW
+    // needs flash attention off and the model's size preset.
+    QStringList args{QStringLiteral("-m"), whisperModel(), QStringLiteral("-f"), wav, QStringLiteral("-l"), QStringLiteral("auto"),
+                     QStringLiteral("-ojf"), QStringLiteral("-of"), base, QStringLiteral("-ml"), QStringLiteral("1"),
+                     QStringLiteral("-sow"), QStringLiteral("-np"), QStringLiteral("-t"), QStringLiteral("8"),
+                     QStringLiteral("--prompt"), QStringLiteral("Umm, let me think like, hmm... Okay, here's what I'm, like, thinking.")};
+    static const QRegularExpression preset(QStringLiteral(R"(ggml-((?:tiny|base|small|medium)(?:\.en)?|large-v[123](?:-turbo)?)(?:-q\w+)?\.bin$)"));
+    if (const auto m = preset.match(QFileInfo(whisperModel()).fileName()); m.hasMatch())
+        args << QStringLiteral("-nfa") << QStringLiteral("--dtw") << QString(m.captured(1)).replace(QLatin1Char('-'), QLatin1Char('.'));
     QProcess p;
-    p.start(whisperBinary(), {QStringLiteral("-m"), whisperModel(), QStringLiteral("-f"), wav, QStringLiteral("-l"), QStringLiteral("auto"),
-                              QStringLiteral("-oj"), QStringLiteral("-of"), base, QStringLiteral("-ml"), QStringLiteral("1"),
-                              QStringLiteral("-sow"), QStringLiteral("-np"), QStringLiteral("-t"), QStringLiteral("8")});
-    if (!p.waitForFinished(10 * 60 * 1000) || p.exitCode() != 0) {
+    p.start(whisperBinary(), args);
+    if (!p.waitForFinished(30 * 60 * 1000) || p.exitCode() != 0) {
         out.error = QStringLiteral("whisper failed on %1: %2").arg(m.name, QString::fromUtf8(p.readAllStandardError()).trimmed().right(300));
         return out;
     }
@@ -271,14 +272,181 @@ Transcript transcribe(const Material &m, qint64 from, qint64 to)
     static const QRegularExpression noise(QStringLiteral(R"(^[\[\(*♪].*[\]\)*♪]$)"));
     for (const QJsonValue &v : doc.value("transcription").toArray()) {
         const QJsonObject o = v.toObject();
-        const QString text = o.value("text").toString().trimmed();
+        QString text = o.value("text").toString().trimmed();
+        text.remove(QLatin1Char('"')).remove(QChar(0x201C)).remove(QChar(0x201D));
         if (text.isEmpty() || noise.match(text).hasMatch()) continue;
         const QJsonObject off = o.value("offsets").toObject();
-        out.words.append({from + qint64(off.value("from").toDouble() * 1000), from + qint64(off.value("to").toDouble() * 1000), text});
+        qint64 start = qint64(off.value("from").toDouble() * 1000);
+        // The earliest DTW time among the word's real tokens, when there is one.
+        qint64 dtw = -1;
+        for (const QJsonValue &tv : o.value("tokens").toArray()) {
+            const QJsonObject tok = tv.toObject();
+            const QString tt = tok.value("text").toString().trimmed();
+            const double td = tok.value("t_dtw").toDouble(-1);
+            if (tt.isEmpty() || tt.startsWith(QLatin1String("[_")) || QStringLiteral(".,!?;:\"").contains(tt) || td < 0) continue;
+            const qint64 us = qint64(td * 10'000);  // centiseconds
+            if (dtw < 0 || us < dtw) dtw = us;
+        }
+        if (dtw >= 0) start = dtw;
+        out.words.append({from + start, from + qint64(off.value("to").toDouble() * 1000), text});
     }
-    if (QFile f(cached); f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(toJson(out)).toJson(QJsonDocument::Compact));
+    std::sort(out.words.begin(), out.words.end(), [](const Word &a, const Word &b) { return a.start < b.start; });
+    return out;
+}
+
+// Moves each word onto its sound: the start of the burst it sits in (DTW
+// times run a little late), the end where that sound stops before the next word.
+void alignToSound(const Material &m, Transcript &t)
+{
+    const QList<float> env = loudness(m);
+    if (env.isEmpty() || t.words.isEmpty()) return;
+    QList<float> sorted = env;
+    std::sort(sorted.begin(), sorted.end());
+    const float threshold = std::max(0.004f, sorted[qsizetype(double(sorted.size() - 1) * 0.9)] * 0.06f);
+    constexpr qint64 kFrame = 10'000;
+    auto loud = [&](qint64 us) {
+        const qsizetype i = qsizetype(us / kFrame);
+        return i >= 0 && i < env.size() && env[i] > threshold;
+    };
+    qint64 prev = -1;
+    for (qsizetype i = 0; i < t.words.size(); ++i) {
+        Word &w = t.words[i];
+        qint64 x = w.start;
+        if (!loud(x)) {  // in a gap: the sound is usually just before (DTW is late), else just after
+            qint64 back = x;
+            while (back > x - 350'000 && back > 0 && !loud(back)) back -= kFrame;
+            if (loud(back)) x = back;
+            else {
+                qint64 fwd = x;
+                while (fwd < x + 150'000 && !loud(fwd)) fwd += kFrame;
+                if (loud(fwd)) x = fwd;
+            }
+        }
+        // Back to the start of this burst, but not into the previous word.
+        while (x - kFrame > prev + 20'000 && loud(x - kFrame) && x - kFrame > w.start - 400'000) x -= kFrame;
+        w.start = std::max(x, prev + 20'000);
+        prev = w.start;
+    }
+    for (qsizetype i = 0; i < t.words.size(); ++i) {
+        Word &w = t.words[i];
+        const qint64 next = i + 1 < t.words.size() ? t.words[i + 1].start : w.start + 1'500'000;
+        qint64 e = next - kFrame;
+        while (e > w.start + 80'000 && !loud(e)) e -= kFrame;
+        w.end = std::max(w.start + 80'000, std::min(next, e + kFrame));
+    }
+}
+
+QString transcriptKey(const Material &m)
+{
+    return fileKey(m) + QStringLiteral("|file|v3|") + QFileInfo(whisperModel()).fileName();
+}
+
+}  // namespace
+
+Transcript cachedFileTranscript(const Material &m)
+{
+    const QString key = transcriptKey(m);
+    {
+        QMutexLocker lock(&g_mutex);
+        if (auto it = g_transcripts.constFind(key); it != g_transcripts.cend()) return *it;
+    }
+    QFile f(cachePath(key));
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    Transcript t = fromJson(QJsonDocument::fromJson(f.readAll()).object());
+    t.done = true;
     QMutexLocker lock(&g_mutex);
-    g_transcripts.insert(key, out);
+    g_transcripts.insert(key, t);
+    return t;
+}
+
+Transcript fileTranscript(const Material &m)
+{
+    if (Transcript t = cachedFileTranscript(m); t.done) return t;
+    Transcript t = runWhisper(m, 0, m.durationUs > 0 ? m.durationUs : qint64(4) * 3600 * 1'000'000);
+    if (!t.ok()) return t;  // not cached: a later try may work (whisper installed meanwhile)
+    alignToSound(m, t);
+    t.done = true;
+    const QString key = transcriptKey(m);
+    if (QFile f(cachePath(key)); f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(toJson(t)).toJson(QJsonDocument::Compact));
+    QMutexLocker lock(&g_mutex);
+    g_transcripts.insert(key, t);
+    return t;
+}
+
+Transcript transcribe(const Material &m, qint64 from, qint64 to)
+{
+    Transcript all = fileTranscript(m);
+    if (!all.ok()) return all;
+    Transcript out;
+    out.language = all.language;
+    out.done = true;
+    for (const Word &w : all.words)
+        if (w.start >= from - 50'000 && w.start < to) out.words << w;
+    return out;
+}
+
+QList<float> loudness(const Material &m)
+{
+    const QString key = fileKey(m);
+    {
+        QMutexLocker lock(&g_mutex);
+        if (auto it = g_loudness.constFind(key); it != g_loudness.cend()) return *it;
+    }
+    QList<float> out;
+    if (m.hasAudio && m.durationUs > 0) {
+        const std::vector<float> x = decodeMono(m, 4, 0, std::min<qint64>(m.durationUs, qint64(4) * 3600 * 1'000'000));
+        constexpr int kWin = 120;  // 10 ms at 12 kHz
+        out.reserve(qsizetype(x.size() / kWin) + 1);
+        for (size_t i = 0; i + kWin <= x.size(); i += kWin) {
+            double s = 0;
+            for (int k = 0; k < kWin; ++k) s += double(x[i + size_t(k)]) * x[i + size_t(k)];
+            out << float(std::sqrt(s / kWin));
+        }
+    }
+    QMutexLocker lock(&g_mutex);
+    g_loudness.insert(key, out);
+    return out;
+}
+
+void putTranscript(const Material &m, Transcript t)
+{
+    t.done = true;
+    QMutexLocker lock(&g_mutex);
+    g_transcripts.insert(transcriptKey(m), t);
+}
+
+bool isFiller(const QString &word)
+{
+    static const QSet<QString> fillers{"um", "umm", "uh", "uhh", "uhm", "erm", "er", "ah", "ahh", "hmm", "hm", "mm", "mhm", "eh"};
+    QString w = word.toLower();
+    w.remove(QRegularExpression(QStringLiteral("[^a-z]")));
+    return fillers.contains(w);
+}
+
+QList<Line> transcriptLines(const Transcript &t)
+{
+    QList<Line> out;
+    int first = -1;
+    for (qsizetype i = 0; i < t.words.size(); ++i) {
+        if (first < 0) first = int(i);
+        const QString &w = t.words[i].text;
+        const bool sentenceEnd = w.endsWith(QLatin1Char('.')) || w.endsWith(QLatin1Char('!')) || w.endsWith(QLatin1Char('?'));
+        const bool pause = i + 1 < t.words.size() && t.words[i + 1].start - t.words[i].end > 900'000;
+        const bool last = i + 1 == t.words.size();
+        if (!sentenceEnd && !pause && !last && i - first < 40) continue;
+        Line line;
+        line.firstWord = first;
+        line.lastWord = int(i);
+        line.start = t.words[first].start;
+        line.end = t.words[i].end;
+        QStringList text;
+        for (int k = first; k <= i; ++k)
+            if (!isFiller(t.words[k].text)) text << t.words[k].text;
+        line.text = text.join(QLatin1Char(' '));
+        // A line of only fillers isn't worth listing.
+        if (!line.text.isEmpty()) out << line;
+        first = -1;
+    }
     return out;
 }
 

@@ -34,16 +34,8 @@ QString readableOn(const QString &background)
 double planLength(const QJsonObject &plan)
 {
     double length = 0;
-    for (const QJsonValue &v : plan.value("main").toArray()) {
-        const QJsonObject o = v.toObject();
-        const double speed = o.contains("speed") ? seconds(o.value("speed")) : 1;
-        if (speed == 0) {
-            length += std::isnan(seconds(o.value("duration"))) ? 2 : seconds(o.value("duration"));
-            continue;
-        }
-        const double f = seconds(o.value("from")), t = seconds(o.value("to"));
-        if (!std::isnan(f) && !std::isnan(t)) length += std::max(0.0, (t - f) / (std::isnan(speed) || speed <= 0 ? 1 : speed));
-    }
+    for (const QJsonValue &v : plan.value("main").toArray())
+        if (const double s = itemSeconds(v.toObject()); !std::isnan(s)) length += s;
     for (const QJsonValue &v : plan.value("texts").toArray()) {
         const QJsonObject t = v.toObject();
         const double end = seconds(t.value("at")) + seconds(t.value("duration"));

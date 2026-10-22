@@ -2,6 +2,7 @@
 
 #include "engine/Beats.h"
 #include "engine/Scenes.h"
+#include "engine/TextEdit.h"
 #include "engine/Speech.h"
 
 #include "engine/Animation.h"
@@ -913,6 +914,46 @@ void Project::clearCaptions()
         d.captions.clear();
         return had;
     });
+}
+
+QVariantList Project::transcript() const
+{
+    QVariantList out;
+    for (const TimelineWord &w : timelineWords(m_draft))
+        out << QVariantMap{{"text", w.text}, {"start", double(w.start)}, {"end", double(w.end)}, {"segment", w.segmentId},
+                           {"filler", w.filler}, {"pause", w.pauseAfter / 1e6}};
+    return out;
+}
+
+void Project::cutRange(qint64 start, qint64 end)
+{
+    qint64 removed = 0;
+    edit([&](Draft &d) {
+        removed = cutTimeline(d, start, end);
+        return removed > 0;
+    });
+    if (removed > 0) emit message(QStringLiteral("Cut %1s").arg(removed / 1e6, 0, 'f', 1));
+}
+
+void Project::cleanSpeechNow(bool fillers, bool pauses)
+{
+    int f = 0, p = 0;
+    qint64 removed = 0;
+    edit([&](Draft &d) {
+        SpeechCutOptions o;
+        o.fillers = fillers;
+        o.pauses = pauses;
+        removed = cleanSpeech(d, o, &f, &p);
+        return removed > 0;
+    });
+    if (removed <= 0) {
+        emit message(QStringLiteral("Nothing to cut"));
+        return;
+    }
+    QStringList what;
+    if (f) what << QStringLiteral("%1 filler%2").arg(f).arg(f == 1 ? "" : "s");
+    if (p) what << QStringLiteral("%1 pause%2").arg(p).arg(p == 1 ? "" : "s");
+    emit message(QStringLiteral("Cut %1 (%2s shorter)").arg(what.join(QStringLiteral(" and "))).arg(removed / 1e6, 0, 'f', 1));
 }
 
 QStringList Project::framingNames() const

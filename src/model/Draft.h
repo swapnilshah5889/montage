@@ -138,6 +138,7 @@ struct Segment {
     bool speech = false;     // someone talking (voiceover, interview): music with `duck` dips under it
     double duck = 0;         // music: volume multiplier while someone speaks (0 = no ducking)
     QString origin;          // what made it, when the app did: "captions" for auto captions
+    QString group;           // jump-cut pieces of one clip (text-based edits) share a group
 
     // Source time shown at `local` (time since the clip started). Handles
     // speed, ramps and freezes; extrapolates past the edges for transitions.
@@ -178,6 +179,7 @@ struct Draft {
     QString style;              // ad style the assistant designs with ("energetic", ...); empty = none
     QString beatSync;           // "beats" or "bars": the assistant cuts to the music; empty = off
     QString captions;           // text preset for auto captions of what's said; empty = none
+    bool cleanSpeech = false;   // the assistant cuts fillers (um, uh) and long pauses from talking clips
     QList<Material> materials;
     QList<Track> tracks;        // tracks[0] is always the main track
 

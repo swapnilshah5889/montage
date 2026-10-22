@@ -6,6 +6,7 @@
 #include "engine/MediaProbe.h"
 #include "engine/Scenes.h"
 #include "engine/Speech.h"
+#include "engine/TextEdit.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -58,6 +59,65 @@ static void sceneTests(const QDir &media)
     const auto w = x.shots[0].bestWindow(2'000'000);
     CHECK(w.first >= 0 && w.second <= 3'000'000 && w.second - w.first == 2'000'000);
     CHECK(cachedSceneIndex(m).shots.size() == 4);  // cached
+}
+
+// Text-based editing on talk.mp4 ("Hi, I'm Sam. Um, our bread is, uh, baked fresh
+// every morning. <1.5 s> We use only organic flour. Uh, and honestly, um, it tastes
+// amazing. <1.2 s> Order online today and get free delivery.")
+static void textEditTests(const QDir &media)
+{
+    if (!whisperProblem().isEmpty()) {
+        std::fprintf(stderr, "skipping text-edit tests: %s\n", qPrintable(whisperProblem()));
+        return;
+    }
+    Material talk;
+    QString err;
+    if (!probeMedia(media.filePath("talk.mp4"), QDir::tempPath(), &talk, &err)) {
+        std::fprintf(stderr, "skipping text-edit tests: %s (run tests/make_media.sh)\n", qPrintable(err));
+        return;
+    }
+    const Transcript t = fileTranscript(talk);
+    CHECK(t.ok() && t.words.size() >= 25);
+    const QList<Line> lines = transcriptLines(t);
+    CHECK(lines.size() == 5 && lines[2].text.contains("organic flour"));
+    int fillers = 0, pauses = 0;
+    speechCuts(talk, t, 0, talk.durationUs, {}, &fillers, &pauses);
+    CHECK(fillers == 4 && pauses >= 2);
+
+    talk.id = "talk";
+    Draft d;
+    d.materials << talk;
+    Segment clip;
+    clip.id = "clip";
+    clip.materialId = "talk";
+    clip.duration = talk.durationUs;
+    d.mainTrack().segments << clip;
+    d.ensureTextMaterial();
+    Segment cta;
+    cta.id = "cta";
+    cta.materialId = kTextMaterialId;
+    cta.start = 14'000'000;
+    cta.duration = 2'000'000;
+    d.tracks << Track{Draft::newId(), TrackRole::Overlay, {cta}};
+    d.normalize();
+
+    int f = 0, p = 0;
+    const qint64 removed = cleanSpeech(d, {}, &f, &p);
+    CHECK(f == 4 && removed > 4'000'000 && d.duration() < talk.durationUs - 4'000'000);
+    QSet<QString> groups;
+    for (const Segment &s : d.mainTrack().segments) groups << s.group;
+    CHECK(d.mainTrack().segments.size() >= 5 && groups.size() == 1 && !groups.values().first().isEmpty());
+    CHECK(d.segment("cta")->start < 10'500'000);  // moved up with the cuts before it
+    QStringList kept;
+    for (const TimelineWord &w : timelineWords(d)) kept << w.text;
+    CHECK(!kept.join(' ').contains("Um,") && kept.join(' ').contains("organic"));
+    CHECK(cleanSpeech(d, {}) < 300'000);  // nothing much left to cut
+
+    // Cutting the first sentence by its timeline range.
+    const QList<TimelineWord> words = timelineWords(d);
+    const qint64 sentenceEnd = words[3].start - 30'000;  // "Hi, I'm Sam." then "our"
+    CHECK(cutTimeline(d, 0, sentenceEnd) > 1'000'000);
+    CHECK(timelineWords(d).first().text.startsWith("our", Qt::CaseInsensitive));
 }
 
 // Beat sync, ducking and captions on real audio (beat.mp3 is a 120 BPM loop,
@@ -343,6 +403,7 @@ int main(int argc, char **argv)
 
     smartTests(media);
     sceneTests(media);
+    textEditTests(media);
 
     std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "all project tests passed", failures,
                 failures == 1 ? "" : "s");

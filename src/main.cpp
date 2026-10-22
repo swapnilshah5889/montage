@@ -5,6 +5,8 @@
 #include "app/Project.h"
 #include "engine/Beats.h"
 #include "engine/Scenes.h"
+#include "engine/Speech.h"
+#include "engine/TextEdit.h"
 #include "engine/ExportJob.h"
 #include "engine/MediaProbe.h"
 #include "engine/Renderer.h"
@@ -89,10 +91,12 @@ int main(int argc, char *argv[])
     const QCommandLineOption planOpt("plan", "Apply an edit plan (JSON) to the project; its \"generate\" items are made first.", "plan.json");
     const QCommandLineOption scenesOpt("scenes", "Print the scene index (shots, quality, labels) of a video or photo, then quit.", "file");
     const QCommandLineOption describeOpt("describe", "With --scenes: also describe each shot with the local vision model.");
+    const QCommandLineOption transcriptOpt("transcript", "Print what's said in a file (lines and fillers), then quit.", "file");
+    const QCommandLineOption cleanOpt("clean-speech", "Cut fillers (um, uh) and long pauses from the project's clips before saving or exporting.");
     const QCommandLineOption beatsOpt("beats", "Print the beat grid of an audio or video file, then quit.", "file");
     const QCommandLineOption formatsOpt("formats", "With --export: one file per shape, e.g. 9:16,1:1,16:9.", "shapes");
     const QCommandLineOption openUiOpt("ui-open", "Open popups / check controls by objectName (comma-separated) once the window is up.", "names");
-    cli.addOptions({typeOpt, waitOpt, quitOpt, frameOpt, frameOutOpt, planOpt, openUiOpt, formatsOpt, beatsOpt, scenesOpt, describeOpt});
+    cli.addOptions({typeOpt, waitOpt, quitOpt, frameOpt, frameOutOpt, planOpt, openUiOpt, formatsOpt, beatsOpt, scenesOpt, describeOpt, transcriptOpt, cleanOpt});
     cli.addOptions({openOpt, importOpt, overlayOpt, saveOpt, exportOpt, shotOpt, seekOpt, selectOpt, playOpt, textOpt,
                     profileOpt, agentOpt, evalOpt, mediaOpt, onlyOpt});
     cli.process(app);
@@ -129,6 +133,28 @@ int main(int argc, char *argv[])
                         s.description.isEmpty() ? "" : qPrintable(QStringLiteral(" | \"%1\" %2 appeal %3").arg(s.description, s.framing).arg(s.appeal)));
         }
         return x.isEmpty() ? 1 : 0;
+    }
+    if (cli.isSet(transcriptOpt)) {
+        mtg::Material m;
+        QString err;
+        if (!mtg::probeMedia(QFileInfo(cli.value(transcriptOpt)).absoluteFilePath(), QDir::tempPath(), &m, &err)) {
+            std::fprintf(stderr, "%s\n", qPrintable(err));
+            return 1;
+        }
+        const mtg::Transcript t = mtg::fileTranscript(m);
+        if (!t.ok()) {
+            std::fprintf(stderr, "%s\n", qPrintable(t.error));
+            return 1;
+        }
+        int fillers = 0, pauses = 0;
+        const auto cuts = mtg::speechCuts(m, t, 0, m.durationUs, {}, &fillers, &pauses);
+        const QList<mtg::Line> lines = mtg::transcriptLines(t);
+        std::printf("%d words, %d lines, %d fillers, %d long pauses (language %s)\n", int(t.words.size()), int(lines.size()), fillers, pauses,
+                    qPrintable(t.language));
+        for (qsizetype i = 0; i < lines.size(); ++i)
+            std::printf("%d) %.2f-%.2fs %s\n", int(i + 1), lines[i].start / 1e6, lines[i].end / 1e6, qPrintable(lines[i].text));
+        for (const auto &c : cuts) std::printf("cut %.2f-%.2fs\n", c.first / 1e6, c.second / 1e6);
+        return 0;
     }
     if (cli.isSet(beatsOpt)) {
         mtg::Material m;
@@ -201,6 +227,15 @@ int main(int argc, char *argv[])
         }
         project.applyDraft(next);
     }
+    if (cli.isSet(cleanOpt)) {
+        mtg::Draft d = project.draft();
+        for (const mtg::Material &m : d.materials)
+            if (m.hasAudio && m.kind != mtg::MaterialKind::Text) mtg::fileTranscript(m);  // transcribe first
+        int fillers = 0, pauses = 0;
+        const qint64 removed = mtg::cleanSpeech(d, {}, &fillers, &pauses);
+        std::fprintf(stderr, "cut %d fillers and %d pauses: %.2fs shorter\n", fillers, pauses, removed / 1e6);
+        project.applyDraft(d);
+    }
     if (cli.isSet(saveOpt)) project.save(QUrl::fromLocalFile(QFileInfo(cli.value(saveOpt)).absoluteFilePath()));
     if (cli.isSet(frameOpt)) {
         mtg::Renderer renderer;
@@ -266,13 +301,20 @@ int main(int argc, char *argv[])
         QObject *root = engine.rootObjects().first();
         const QStringList names = cli.value(openUiOpt).split(QLatin1Char(','), Qt::SkipEmptyParts);
         QTimer::singleShot(800, &app, [root, names] {
-            for (const QString &name : names) {
+            for (const QString &spec : names) {
+                // "object.property=value" sets a property; otherwise open/click/check the object.
+                const QString name = spec.section(QLatin1Char('.'), 0, 0).section(QLatin1Char('='), 0, 0);
                 QObject *obj = root->findChild<QObject *>(name);
+                if (obj && spec.contains(QLatin1Char('='))) {
+                    obj->setProperty(qPrintable(spec.section(QLatin1Char('.'), 1).section(QLatin1Char('='), 0, 0)), spec.section(QLatin1Char('='), 1));
+                    continue;
+                }
                 if (!obj) {
-                    std::fprintf(stderr, "ui-open: %s not found\n", qPrintable(name));
+                    std::fprintf(stderr, "ui-open: %s not found\n", qPrintable(spec));
                     continue;
                 }
                 if (obj->metaObject()->indexOfMethod("open()") >= 0) QMetaObject::invokeMethod(obj, "open");
+                else if (obj->metaObject()->indexOfMethod("click()") >= 0) QMetaObject::invokeMethod(obj, "click");  // buttons and tabs
                 else obj->setProperty("checked", true);
             }
         });

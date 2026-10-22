@@ -98,10 +98,11 @@ ApplicationWindow {
                 spacing: 0
                 TabBar {
                     id: sideTabs
+                    objectName: "sideTabs"
                     Layout.fillWidth: true
                     background: Rectangle { color: Theme.panel }
                     Repeater {
-                        model: ["Media", "Edit"]
+                        model: ["Media", "Edit", "Transcript"]
                         TabButton {
                             id: tab
                             required property string modelData
@@ -134,10 +135,11 @@ ApplicationWindow {
                     currentIndex: sideTabs.currentIndex
                     MediaPanel { onImportRequested: importDialog.open() }
                     InspectorPanel {}
+                    TranscriptPanel {}
                 }
                 Connections {
                     target: Project
-                    function onSelectionChanged() { if (Project.selectedId !== "") sideTabs.currentIndex = 1 }
+                    function onSelectionChanged() { if (Project.selectedId !== "" && sideTabs.currentIndex !== 2) sideTabs.currentIndex = 1 }
                 }
                 Component.onCompleted: if (Project.selectedId !== "") sideTabs.currentIndex = 1
             }

@@ -1,5 +1,7 @@
 #include "MediaIndexer.h"
 
+#include "engine/Speech.h"
+
 #include <QBuffer>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -100,11 +102,13 @@ void MediaIndexer::watch(const Draft &d)
 {
     bool added = false;
     for (const Material &m : d.materials) {
-        if ((m.kind != MaterialKind::Video && m.kind != MaterialKind::Image) || m.path.isEmpty()) continue;
+        if ((m.kind != MaterialKind::Video && m.kind != MaterialKind::Image && m.kind != MaterialKind::Audio) || m.path.isEmpty()) continue;
         if (m_seen.contains(m.path) || (m_current >= 0 && m_job.material.path == m.path)) continue;
         if (std::any_of(m_queue.cbegin(), m_queue.cend(), [&](const Job &j) { return j.material.path == m.path; })) continue;
-        const SceneIndex cached = cachedSceneIndex(m);
-        if (!cached.isEmpty() && (cached.described || !m_config.enabled)) {
+        const bool needsWords = wantsTranscript(m) && !cachedFileTranscript(m).done;
+        const SceneIndex cached = m.kind == MaterialKind::Audio ? SceneIndex{} : cachedSceneIndex(m);
+        const bool scenesDone = m.kind == MaterialKind::Audio || (!cached.isEmpty() && (cached.described || !m_config.enabled));
+        if (scenesDone && !needsWords) {
             m_seen.insert(m.path, true);
             continue;
         }
@@ -131,6 +135,7 @@ QString MediaIndexer::status() const
 {
     if (m_current < 0 && m_queue.isEmpty()) return {};
     const QString which = QStringLiteral("%1 of %2").arg(std::min(m_done + 1, m_total)).arg(m_total);
+    if (m_current == 2) return QStringLiteral("Listening to your clips (%1)").arg(which);
     return m_current == 1 ? QStringLiteral("Watching your clips (%1): describing shots").arg(which)
                           : QStringLiteral("Watching your clips (%1)").arg(which);
 }
@@ -146,6 +151,18 @@ void MediaIndexer::next()
     m_job = m_queue.takeFirst();
     m_current = 0;
     emit statusChanged();
+    if (m_job.material.kind == MaterialKind::Audio) {  // nothing to look at: just listen
+        m_current = 2;
+        emit statusChanged();
+        transcribe([this] {
+            m_seen.insert(m_job.material.path, true);
+            ++m_done;
+            m_current = -1;
+            emit statusChanged();
+            next();
+        });
+        return;
+    }
     auto *result = new SceneIndex;
     const Material material = m_job.material;
     QThread *worker = QThread::create([result, material] { *result = sceneIndex(material); });
@@ -163,15 +180,43 @@ void MediaIndexer::next()
             m_job.order.removeIf([&](int i) { return m_job.index.shots[i].length() > 0 && m_job.index.shots[i].length() < 800'000; });
         while (m_job.order.size() > m_config.maxShotsPerFile) m_job.order.removeLast();
         if (!m_config.enabled || m_job.order.isEmpty()) {
-            m_seen.insert(m_job.material.path, true);
-            ++m_done;
-            m_current = -1;
-            next();
+            m_current = 2;
+            emit statusChanged();
+            transcribe([this] {
+                m_seen.insert(m_job.material.path, true);
+                ++m_done;
+                m_current = -1;
+                emit statusChanged();
+                next();
+            });
             return;
         }
         m_current = 1;
         emit statusChanged();
         pickModel([this] { describeNext(); });
+    });
+    worker->start();
+}
+
+bool MediaIndexer::wantsTranscript(const Material &m)
+{
+    // Long files would take minutes; whisper must be installed.
+    return m.hasAudio && m.durationUs > 0 && m.durationUs < qint64(45) * 60 * 1'000'000 && whisperProblem().isEmpty()
+           && !qEnvironmentVariableIsSet("MONTAGE_NO_TRANSCRIBE");
+}
+
+void MediaIndexer::transcribe(const std::function<void()> &then)
+{
+    if (!wantsTranscript(m_job.material) || cachedFileTranscript(m_job.material).done) {
+        then();
+        return;
+    }
+    const Material material = m_job.material;
+    QThread *worker = QThread::create([material] { fileTranscript(material); });
+    connect(worker, &QThread::finished, this, [this, worker, then] {
+        worker->deleteLater();
+        emit indexed(m_job.material.path);
+        then();
     });
     worker->start();
 }
@@ -210,11 +255,15 @@ void MediaIndexer::describeNext()
     auto finishJob = [this] {
         setShotDescriptions(m_job.material, m_job.index.shots);
         emit indexed(m_job.material.path);
-        m_seen.insert(m_job.material.path, true);
-        ++m_done;
-        m_current = -1;
+        m_current = 2;
         emit statusChanged();
-        next();
+        transcribe([this] {
+            m_seen.insert(m_job.material.path, true);
+            ++m_done;
+            m_current = -1;
+            emit statusChanged();
+            next();
+        });
     };
     if (m_model.isEmpty() || m_job.order.isEmpty()) {
         finishJob();

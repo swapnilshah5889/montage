@@ -458,6 +458,7 @@ QJsonObject Draft::toJson() const
             if (s.speech) so.insert("speech", true);
             if (s.duck > 0) so.insert("duck", s.duck);
             if (!s.origin.isEmpty()) so.insert("origin", s.origin);
+            if (!s.group.isEmpty()) so.insert("group", s.group);
             if (!s.transition.name.isEmpty())
                 so.insert("transition", QJsonObject{{"name", s.transition.name}, {"duration", double(s.transition.us)}});
             if (s.materialId == kTextMaterialId) so.insert("text", textToJson(s.text));
@@ -478,6 +479,7 @@ QJsonObject Draft::toJson() const
         {"style", style},
         {"beat_sync", beatSync},
         {"captions", captions},
+        {"clean_speech", cleanSpeech},
         {"materials", mats},
         {"tracks", trks},
     };
@@ -498,6 +500,7 @@ Draft Draft::fromJson(const QJsonObject &obj)
     d.style = obj.value("style").toString();
     d.beatSync = obj.value("beat_sync").toString();
     d.captions = obj.value("captions").toString();
+    d.cleanSpeech = obj.value("clean_speech").toBool();
 
     for (const QJsonValue &v : obj.value("materials").toArray()) {
         const QJsonObject o = v.toObject();
@@ -545,6 +548,7 @@ Draft Draft::fromJson(const QJsonObject &obj)
             s.speech = so.value("speech").toBool();
             s.duck = std::clamp(so.value("duck").toDouble(0), 0.0, 1.0);
             s.origin = so.value("origin").toString();
+            s.group = so.value("group").toString();
             s.transition.name = so.value("transition").toObject().value("name").toString();
             s.transition.us = qint64(so.value("transition").toObject().value("duration").toDouble(500'000));
             if (so.contains("text")) s.text = textFromJson(so.value("text").toObject());

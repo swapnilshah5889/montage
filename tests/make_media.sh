@@ -31,6 +31,10 @@ if command -v say >/dev/null 2>&1; then
   say -o "$out/voiceover.aiff" "Fresh bread every morning. Order yours today."
   f -i "$out/voiceover.aiff" -ar 44100 -ac 1 "$out/voiceover.wav"
   rm -f "$out/voiceover.aiff"
+  # A talking head with fillers and long pauses, for text-based editing
+  say -o "$out/talk.aiff" "Hi, I'm Sam. Um, our bread is, uh, baked fresh every morning. [[slnc 1500]] We use only organic flour. Uh, and honestly, um, it tastes amazing. [[slnc 1200]] Order online today and get free delivery."
+  f -f lavfi -i "testsrc2=size=1280x720:rate=30" -i "$out/talk.aiff" -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest "$out/talk.mp4"
+  rm -f "$out/talk.aiff"
 fi
 
 # Legacy names used by project_test

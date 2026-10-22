@@ -660,6 +660,22 @@ void Renderer::renderAudio(qint64 startSample, int frames, float *out)
             if (seg.speed <= 0) continue;  // freeze frames are silent
             AudioDecoder *dec = audioFor(seg, *mat);
             if (!dec) continue;
+            // Near the clip's edges, mix into scratch first and fade over 5 ms,
+            // so jump cuts (text-based edits) never click.
+            constexpr qint64 kFade = kSampleRate / 200;
+            const bool edge = from < segStart + kFade || to > segEnd - kFade;
+            if (edge) m_scratch.assign(size_t(frames) * kChannels, 0.0f);
+            float *const mixOut = edge ? m_scratch.data() : out;
+            auto finishEdges = [&] {
+                if (!edge) return;
+                for (qint64 i = from; i < to; ++i) {
+                    const double g = std::min({1.0, double(i - segStart) / kFade, double(segEnd - i) / kFade});
+                    for (int c = 0; c < kChannels; ++c) {
+                        const size_t k = size_t(i - startSample) * kChannels + size_t(c);
+                        out[k] += m_scratch[k] * float(std::max(0.0, g));
+                    }
+                }
+            };
             const bool ducked = seg.duck > 0 && !m_speech.isEmpty();
             // Volume for a block centred on timeline sample `mid`: lower while someone speaks.
             auto gainAt = [&](qint64 mid) {
@@ -672,13 +688,15 @@ void Renderer::renderAudio(qint64 startSample, int frames, float *out)
                 for (qint64 b = from; b < to; b += kBlock) {
                     const qint64 n = std::min(kBlock, to - b);
                     const qint64 srcSample = av_rescale(seg.sourceStart, kSampleRate, AV_TIME_BASE) + (b - segStart);
-                    dec->mixInto(srcSample, int(n), out + (b - startSample) * kChannels, gainAt(b + n / 2));
+                    dec->mixInto(srcSample, int(n), mixOut + (b - startSample) * kChannels, gainAt(b + n / 2));
                 }
+                finishEdges();
                 continue;
             }
             if (seg.speed == 1.0 && seg.curve.isEmpty()) {
                 const qint64 srcSample = av_rescale(seg.sourceStart, kSampleRate, AV_TIME_BASE) + (from - segStart);
-                dec->mixInto(srcSample, int(to - from), out + (from - startSample) * kChannels, float(seg.volume));
+                dec->mixInto(srcSample, int(to - from), mixOut + (from - startSample) * kChannels, float(seg.volume));
+                finishEdges();
                 continue;
             }
             // Time-remapped audio: read the source span each block covers and
@@ -693,7 +711,7 @@ void Renderer::renderAudio(qint64 startSample, int frames, float *out)
                 const int m = int(std::clamp<qint64>(srcB - srcA, 1, kBlock * 32));
                 m_resample.assign(size_t(m + 1) * kChannels, 0.0f);
                 dec->mixInto(srcA, m + 1, m_resample.data(), 1.0f);
-                float *dst = out + (b - startSample) * kChannels;
+                float *dst = mixOut + (b - startSample) * kChannels;
                 const float gain = gainAt(b + n / 2);
                 for (qint64 i = 0; i < n; ++i) {
                     const double pos = double(i) * m / double(n);
@@ -705,6 +723,7 @@ void Renderer::renderAudio(qint64 startSample, int frames, float *out)
                     }
                 }
             }
+            finishEdges();
         }
     }
 

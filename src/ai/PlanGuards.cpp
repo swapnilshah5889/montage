@@ -1,6 +1,7 @@
 #include "PlanGuards.h"
 
 #include "engine/Scenes.h"
+#include "engine/Speech.h"
 
 #include "Generators.h"
 
@@ -191,6 +192,8 @@ QStringList keepUnrequested(const QString &request, const QJsonObject &current, 
     restore("moments", moments, "the effects");
     restore("style", styled, "the style");
     restore("captions", matches(req, R"(\b(captions?|subtitles?|transcri\w*)\b)"), "the captions");
+    restore("clean_speech", matches(req, R"(\b(u+m+s?|u+h+s?|fillers?|pauses?|silences?|dead air|gaps|tighten|tighter|snappier|jump ?cuts?|clean)\b)"),
+            "the speech cleanup");
     // A speed change nobody asked for (small models sometimes add "speed" to
     // trim): keep each clip's current speed.
     if (!matches(req, R"(\b(speed|faster|slower|fast|slow|slow[ -]?mo\w*|time-?lapse|ramp|freeze|hold|[0-9.]+ ?x)\b)")) {
@@ -233,6 +236,7 @@ bool fitToLength(double want, const Draft &d, const MediaIndex &index, QJsonObje
         double from, dur, cap;  // timeline seconds (cap = longest the file allows at this speed)
         bool still;             // photos and freezes keep their length
         double speed;           // 0 for freezes
+        bool locked = false;    // text-edited clips ("skips"): left exactly as they are
     };
     QList<Clip> clips;
     double total = 0;
@@ -250,6 +254,12 @@ bool fitToLength(double want, const Draft &d, const MediaIndex &index, QJsonObje
             continue;
         }
         speed = std::max(0.1, speed);
+        if (!o.value("skips").toArray().isEmpty()) {
+            const double len = itemSeconds(o);
+            clips.append({0, std::isnan(len) ? 0 : len, 1e9, true, speed, true});
+            total += clips.last().dur;
+            continue;
+        }
         const double cap = m->isTimed() ? m->durationUs / 1e6 : 1e9;
         double f = o.contains("from") ? seconds(o.value("from")) : 0;
         double t = o.contains("to") ? seconds(o.value("to")) : f + seconds(o.value("duration"));
@@ -296,6 +306,10 @@ bool fitToLength(double want, const Draft &d, const MediaIndex &index, QJsonObje
 
     double newTotal = 0;
     for (int i = 0; i < clips.size(); ++i) {
+        if (clips[i].locked) {
+            newTotal += clips[i].dur;
+            continue;
+        }
         target[i] = std::max(0.3, round2(target[i]));
         QJsonObject o = main[i].toObject();
         if (clips[i].speed == 0) {  // freeze: only its hold length changes
@@ -371,15 +385,8 @@ QList<double> itemLengths(const QJsonArray &main)
 {
     QList<double> out;
     for (const QJsonValue &v : main) {
-        const QJsonObject o = v.toObject();
-        const double speed = o.contains("speed") ? seconds(o.value("speed")) : 1;
-        if (speed == 0) {
-            const double d = seconds(o.value("duration"));
-            out << (std::isnan(d) ? 2 : d);
-            continue;
-        }
-        const double f = seconds(o.value("from")), t = seconds(o.value("to"));
-        out << ((std::isnan(f) || std::isnan(t)) ? 0 : std::max(0.0, (t - f) / (std::isnan(speed) || speed <= 0 ? 1 : speed)));
+        const double s = itemSeconds(v.toObject());
+        out << (std::isnan(s) ? 0 : s);
     }
     return out;
 }
@@ -1435,5 +1442,296 @@ QStringList applyNamedShots(const QString &request, const Draft &d, const MediaI
                                                                                           ? x.shots[best.shot].tags.mid(0, 2).join(", ")
                                                                                           : x.shots[best.shot].description)};
 }
+
+namespace {
+
+struct LineHit {
+    QString materialId;
+    int line = -1;
+    double weight = 0;
+};
+
+QString stemWord(QString w)
+{
+    for (const char *suffix : {"ing", "es", "s", "ed"})
+        if (w.size() > 4 && w.endsWith(QLatin1String(suffix))) {
+            w.chop(int(qstrlen(suffix)));
+            break;
+        }
+    return w;
+}
+
+QSet<QString> stems(const QString &text)
+{
+    QSet<QString> out;
+    for (const QString &w : text.toLower().split(QRegularExpression(QStringLiteral("[^a-z0-9']+")), Qt::SkipEmptyParts))
+        if (w.size() >= 3) out << stemWord(w);
+    return out;
+}
+
+// Lines of the given files that match what `phrase` names, strongest first.
+QList<LineHit> findLines(const QString &phrase, const Draft &d, const QStringList &materialIds)
+{
+    static const QSet<QString> generic{"the", "and", "part", "parts", "bit", "line", "lines", "where", "when", "say", "says", "said",
+                                       "saying", "talk", "talks", "talking", "about", "mention", "mentions", "that", "this", "cut",
+                                       "remove", "delete", "drop", "take", "out", "get", "rid", "with", "start", "end", "then",
+                                       "first", "last", "use", "put", "make", "video", "clip", "quote", "quotes", "sentence"};
+    QStringList want;
+    for (const QString &w : phrase.toLower().split(QRegularExpression(QStringLiteral("[^a-z0-9']+")), Qt::SkipEmptyParts))
+        if (w.size() >= 3 && !generic.contains(w)) want << stemWord(w);
+    // People say "my name" for "I'm Sam".
+    const bool name = phrase.toLower().contains(QLatin1String("my name")) || phrase.toLower().contains(QLatin1String("introduce"));
+    if (want.isEmpty() && !name) return {};
+    QList<LineHit> out;
+    for (const QString &id : materialIds) {
+        const Material *m = d.material(id);
+        if (!m) continue;
+        const QList<Line> lines = transcriptLines(cachedFileTranscript(*m));
+        for (qsizetype i = 0; i < lines.size(); ++i) {
+            const QSet<QString> have = stems(lines[i].text);
+            double hits = 0;
+            for (const QString &w : want) hits += have.contains(w) ? 1 : 0;
+            if (name && QRegularExpression(QStringLiteral(R"(\b(?i:i'm|i am|my name is|this is)\s+[A-Z])")).match(lines[i].text).hasMatch()) hits += 2;
+            const double need = want.size() >= 2 ? std::max(2.0, want.size() * 0.5) : 1;
+            if (hits >= need) out.append({id, int(i), hits});
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const LineHit &a, const LineHit &b) { return a.weight > b.weight; });
+    return out;
+}
+
+// The [from, to) of a line in seconds, with a little air either side.
+QPair<double, double> lineSpan(const Material &m, const Line &l)
+{
+    const double from = std::max(0.0, l.start / 1e6 - 0.06);
+    const double to = std::min(m.durationUs / 1e6, l.end / 1e6 + 0.15);
+    return {round2(from), round2(to)};
+}
+
+}  // namespace
+
+QStringList resolveLines(const Draft &d, const MediaIndex &index, QJsonObject *plan)
+{
+    QStringList notes;
+    for (const char *key : {"main", "overlays"}) {
+        QJsonArray items = plan->value(QLatin1String(key)).toArray();
+        bool changed = false;
+        for (qsizetype i = 0; i < items.size(); ++i) {
+            QJsonObject o = items[i].toObject();
+            if (!o.contains("line") && !o.contains("lines") && !o.contains("says") && !o.contains("cut_lines")) continue;
+            const Material *m = lookup(o.value("media").toString(), d, index);
+            const QList<Line> lines = m ? transcriptLines(cachedFileTranscript(*m)) : QList<Line>{};
+            int first = -1, last = -1;
+            if (o.contains("line")) first = last = o.value("line").toInt() - 1;
+            if (o.contains("lines")) {
+                const QJsonArray r = o.value("lines").toArray();
+                first = r.at(0).toInt() - 1;
+                last = r.size() > 1 ? r.at(r.size() - 1).toInt() - 1 : first;
+            }
+            if (first < 0 && o.contains("says") && m) {
+                const QList<LineHit> hits = findLines(o.value("says").toString(), d, {m->id});
+                if (!hits.isEmpty()) first = last = hits.first().line;
+            }
+            if (first > last) std::swap(first, last);
+            if (m && first >= 0 && last < lines.size()) {
+                const auto a = lineSpan(*m, lines[first]), b = lineSpan(*m, lines[last]);
+                o.insert("from", a.first);
+                o.insert("to", b.second);
+                o.remove("duration");
+                notes << (first == last ? QStringLiteral("used line %1 of %2").arg(first + 1).arg(m->name)
+                                        : QStringLiteral("used lines %1-%2 of %3").arg(first + 1).arg(last + 1).arg(m->name));
+            }
+            // Lines to take out of the item.
+            if (m && o.contains("cut_lines")) {
+                const double f = seconds(o.value("from")), t = seconds(o.value("to"));
+                QJsonArray skips = o.value("skips").toArray();
+                int cut = 0;
+                for (const QJsonValue &v : o.value("cut_lines").toArray()) {
+                    const int n = v.toInt() - 1;
+                    if (n < 0 || n >= lines.size()) continue;
+                    const auto span = lineSpan(*m, lines[n]);
+                    if (!std::isnan(f) && !std::isnan(t) && (span.second <= f || span.first >= t)) continue;
+                    skips.append(QJsonArray{span.first, span.second});
+                    ++cut;
+                }
+                if (cut) {
+                    o.insert("skips", skips);
+                    notes << QStringLiteral("cut %1 line%2 from %3").arg(cut).arg(cut == 1 ? "" : "s").arg(m->name);
+                }
+            }
+            o.remove("line");
+            o.remove("lines");
+            o.remove("says");
+            o.remove("cut_lines");
+            items[i] = o;
+            changed = true;
+        }
+        if (changed) plan->insert(QLatin1String(key), items);
+    }
+    return notes;
+}
+
+QStringList applySpeechRequests(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan)
+{
+    const QString req = request.toLower();
+    QStringList notes;
+    const bool keep = matches(req, R"(\b(keep|leave|don't (cut|remove)|do not (cut|remove)|put back|restore)\b)");
+    if (matches(req, R"(\b(u+m+s?|u+h+s?|erm+s?|fillers?|filler words|pauses|silences?|dead air|gaps|tighten|tighter|snappier|jump ?cuts?|breathing room)\b)")) {
+        const bool on = !keep;
+        if (plan->value("clean_speech").toBool() != on) {
+            plan->insert("clean_speech", on);
+            notes << (on ? QStringLiteral("cutting the ums and long pauses") : QStringLiteral("keeping the ums and pauses"));
+        }
+    }
+    // "Cut the part where I say my name": take that line out of the clip that has it.
+    if (!keep && matches(req, R"(\b(cut|remove|delete|drop|lose|get rid of|take out|skip)\b)")
+        && matches(req, R"(\b(part|bit|line|sentence|where|when|says?|said|mentions?|talks? about|my name|introduce)\b)")) {
+        QStringList used;
+        for (const QJsonValue &v : plan->value("main").toArray())
+            if (const Material *m = lookup(v.toObject().value("media").toString(), d, index); m && !used.contains(m->id)) used << m->id;
+        const QList<LineHit> hits = findLines(request, d, used);
+        if (!hits.isEmpty() && (hits.size() == 1 || hits[1].weight < hits.first().weight)) {
+            const Material *m = d.material(hits.first().materialId);
+            const Line line = transcriptLines(cachedFileTranscript(*m)).value(hits.first().line);
+            const auto span = lineSpan(*m, line);
+            QJsonArray main = plan->value("main").toArray();
+            for (qsizetype i = 0; i < main.size(); ++i) {
+                QJsonObject o = main[i].toObject();
+                if (lookup(o.value("media").toString(), d, index) != m) continue;
+                const double f = seconds(o.value("from")), t = seconds(o.value("to"));
+                if (std::isnan(f) || std::isnan(t) || span.second <= f || span.first >= t) continue;
+                bool already = false;
+                for (const QJsonValue &v : o.value("skips").toArray())
+                    already |= seconds(v.toArray().at(0)) <= span.first + 0.05 && seconds(v.toArray().at(1)) >= span.second - 0.05;
+                if (already) break;
+                if (span.first <= f + 0.05 && span.second >= t - 0.05) {  // the whole item is that line
+                    main.removeAt(i);
+                } else {
+                    QJsonArray skips = o.value("skips").toArray();
+                    skips.append(QJsonArray{std::max(span.first, f), std::min(span.second, t)});
+                    o.insert("skips", skips);
+                    main[i] = o;
+                }
+                plan->insert("main", main);
+                notes << QStringLiteral("cut \"%1\"").arg(line.text.left(50));
+                break;
+            }
+        }
+    }
+    return notes;
+}
+
+namespace {
+
+// "start with X, then Y" -> ["start with X", "Y"].
+QStringList requestParts(const QString &request)
+{
+    QStringList parts;
+    for (const QString &p : request.toLower().split(QRegularExpression(QStringLiteral(R"(\b(?:and then|then|followed by|after that|finally|next)\b|[,;])")), Qt::SkipEmptyParts))
+        if (!p.trimmed().isEmpty()) parts << p.trimmed();
+    return parts;
+}
+
+QStringList talkingFiles(const Draft &d, const MediaIndex &index)
+{
+    QStringList ids;
+    for (const QString &id : index.materialIds())
+        if (const Material *m = d.material(id); m && m->hasAudio && m->kind != MaterialKind::Audio && cachedFileTranscript(*m).done
+                                                 && !cachedFileTranscript(*m).words.isEmpty())
+            ids << id;
+    return ids;
+}
+
+}  // namespace
+
+QStringList arrangeLines(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan)
+{
+    const QString req = request.toLower();
+    QStringList notes;
+    // "Remove the ums" isn't "remove these lines".
+    const bool cutsLines = matches(req, R"(\b(cut|remove|delete|drop|lose|skip|take out|get rid of)\b.*\b(part|bit|line|lines|sentence|where|when|about|says?|said|mentions?|my name|introduce)\b)");
+    if (!cutsLines) {
+        QJsonArray main = plan->value("main").toArray();
+        bool dropped = false;
+        for (qsizetype i = 0; i < main.size(); ++i) {
+            QJsonObject o = main[i].toObject();
+            if (!o.contains("cut_lines")) continue;
+            o.remove("cut_lines");
+            main[i] = o;
+            dropped = true;
+        }
+        if (dropped) {
+            plan->insert("main", main);
+            notes << QStringLiteral("kept every line");
+        }
+    }
+
+    // An arrangement of lines, each part naming one line clearly.
+    if (cutsLines || !matches(req, R"(\b(start|starts|begin|open|first|then|followed by|after that|end with|finish)\b)")) return notes;
+    const QStringList files = talkingFiles(d, index);
+    if (files.isEmpty()) return notes;
+    QList<LineHit> picked;
+    for (const QString &part : requestParts(request)) {
+        const QList<LineHit> hits = findLines(part, d, files);
+        if (hits.isEmpty()) continue;
+        if (hits.size() > 1 && hits[1].weight >= hits[0].weight) return notes;  // ambiguous: leave it to the model
+        picked << hits.first();
+    }
+    if (picked.size() < 2) return notes;
+    // Only when the plan is made of those talking clips (don't throw away other footage).
+    for (const QJsonValue &v : plan->value("main").toArray())
+        if (const Material *m = lookup(v.toObject().value("media").toString(), d, index); m && !files.contains(m->id)) return notes;
+    QJsonArray main;
+    QStringList order;
+    for (const LineHit &h : picked) {
+        const Material *m = d.material(h.materialId);
+        const Line line = transcriptLines(cachedFileTranscript(*m)).value(h.line);
+        const auto span = lineSpan(*m, line);
+        main.append(QJsonObject{{"media", index.alias(h.materialId)}, {"from", span.first}, {"to", span.second}});
+        order << QStringLiteral("\"%1\"").arg(line.text.left(30));
+    }
+    if (main == plan->value("main").toArray()) return notes;
+    plan->insert("main", main);
+    notes << QStringLiteral("arranged the lines: %1").arg(order.join(QStringLiteral(", then ")));
+    return notes;
+}
+
+namespace { QStringList missingLine(const LineHit &best, const QJsonObject &plan, const Draft &d, const MediaIndex &index); }
+
+QStringList missingLines(const QString &request, const QJsonObject &plan, const Draft &d, const MediaIndex &index)
+{
+    // Only requests about what's said.
+    if (!matches(request.toLower(), R"(\b(line|lines|quote|quotes|says?|said|saying|talks? about|mentions?|part where|bit where|soundbites?)\b)")) return {};
+    if (matches(request.toLower(), R"(\b(cut|remove|delete|drop|lose|get rid of|take out|skip)\b)")) return {};
+    const QStringList ids = talkingFiles(d, index);
+    QList<LineHit> wanted;
+    for (const QString &part : requestParts(request))
+        if (const QList<LineHit> hits = findLines(part, d, ids); !hits.isEmpty()) wanted << hits.first();
+    for (const LineHit &best : wanted) {
+        const QStringList miss = missingLine(best, plan, d, index);
+        if (!miss.isEmpty()) return miss;
+    }
+    return {};
+}
+
+namespace {
+QStringList missingLine(const LineHit &best, const QJsonObject &plan, const Draft &d, const MediaIndex &index)
+{
+    const Material *m = d.material(best.materialId);
+    const Line line = transcriptLines(cachedFileTranscript(*m)).value(best.line);
+    for (const char *key : {"main", "overlays"})
+        for (const QJsonValue &v : plan.value(QLatin1String(key)).toArray()) {
+            const QJsonObject o = v.toObject();
+            if (lookup(o.value("media").toString(), d, index) != m) continue;
+            if (o.value("line").toInt() == best.line + 1) return {};
+            const double f = seconds(o.value("from")), t = seconds(o.value("to"));
+            if (!std::isnan(f) && !std::isnan(t) && f <= line.start / 1e6 + 0.3 && t >= line.end / 1e6 - 0.3) return {};
+        }
+    return {QStringLiteral("The request asks for what's said in %1 line %2 (\"%3\"), which your plan doesn't use. Add {\"media\": \"%1\", \"line\": %2} to \"main\".")
+                .arg(index.alias(best.materialId))
+                .arg(best.line + 1)
+                .arg(line.text.left(60))};
+}
+}  // namespace
 
 }  // namespace mtg::ai
