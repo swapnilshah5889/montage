@@ -343,6 +343,9 @@ void EditorTools::applyPlan(const ToolCall &call, const std::function<void(ToolR
     const MediaIndex index(current);
     const QJsonObject before = planFromDraft(current, index);
     QStringList styled = resolveShots(current, index, &plan);
+    styled += arrangeLines(m_request, current, index, &plan);
+    styled += resolveLines(current, index, &plan);
+    styled += applySpeechRequests(m_request, current, index, &plan);
     styled += pickBestMoments(m_request, current, index, &plan);
     styled += applySmartRequests(m_request, current, index, &plan);
     styled += applyBrand(m_request, loadBrandKit(), before, current, index, &plan);

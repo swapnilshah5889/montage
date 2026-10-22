@@ -68,6 +68,17 @@ DeepSeek, OpenRouter, or local models through Ollama or LM Studio.
   are pointed out to the model instead. A clip that has to run longer than its shot is
   slowed slightly rather than spilling into the next shot. Agent mode has a `find_moments` tool. Indexes are cached per file; work pauses
   while the assistant answers. The media panel shows progress and shot counts.
+- **Text-based editing** (`src/engine/TextEdit.*`, `qml/TranscriptPanel.qml`): clips with speech are
+  transcribed in the background (whisper.cpp, DTW-aligned word times snapped to the audio), and
+  the Transcript tab shows what's said: click a word to jump there, shift-click to select, ⌫ to
+  cut it from the video; fillers are struck through and long pauses marked. "Remove fillers" and
+  "Tighten pauses" cut every um, uh and over-long silence, with cut points in silences and 5 ms
+  fades so jump cuts don't click. The assistant sees each talking clip as numbered lines and edits
+  by what's said: `"line": 3` / `"lines": [2, 4]` / `"says": "free delivery"` play exactly that
+  speech, `"cut_lines"` takes lines out, `"clean_speech": true` removes ums and pauses. A cut clip
+  stays one plan item with `"skips"` (one jump-cut group on the timeline, which transitions and
+  beat sync leave alone). Requests like "remove the ums", "cut the part where I say my name" and
+  "start with the free delivery line, then the bread line" are applied by the app directly.
 - **Smart edit** (`src/engine/Beats.*`, `Speech.*`, `src/ai/Finishing.*`): the app does the
   parts that need the media itself after a plan is built, off the UI thread.
   - *Cut to the beat* (`"beat_sync": "beats" | "bars"`): a beat tracker (spectral-flux onsets
@@ -124,6 +135,7 @@ qwen2.5:7b on Ollama (Apple Silicon), guided mode:
 | `tests/eval/ads-holdout.json` (5 cases, never tuned against) | 5/5 | - | 10-70 s |
 | `tests/eval/generate.json` (generated image, voiceover, music; skipped when a backend is down) | 2/2 | - | 10-130 s (first run), 10-20 s cached |
 | `tests/eval/scenes.json` (choosing shots: best part, by content, skip blurry) | 5/5 | - | - |
+| `tests/eval/transcript.json` (editing by what's said: ums and pauses, lines, order) | 5/5 | 3/5 (before the line guards) | 5-10 s |
 | `tests/eval/smart.json` (beat sync, captions, ducking, background removal) | 5/5 | 4/5 (before the background-colour fix) | 7-50 s |
 
 Both hold-out sets were written before tuning against them, but each was later read to
@@ -174,6 +186,7 @@ server; agent mode hasn't been scored against a live hosted model yet.
 - Speed: constant speed, freeze frames, speed ramps (ramp up/down, hero, bullet) with time-remapped audio
 - MP4 export (H.264 + AAC) at canvas resolution, or every platform at once (9:16, 4:5, 1:1,
   16:9), each re-laid-out and reframed
+- Transcript panel: edit the video by deleting words; remove fillers and tighten pauses in one click
 - Scene index: shots, quality (sharp, steady, exposure, faces), on-device labels and local
   vision-model descriptions for every clip; shot counts in the media panel
 - Smart edit: cut to the beat (beat ticks on music clips), auto captions from speech
@@ -221,8 +234,10 @@ build/Montage.app/Contents/MacOS/Montage --import a.mp4 --import b.mov --import 
 `--screenshot <png>` (render the window to a PNG, then quit) are also available. `--plan <json>`
 applies an edit plan (making its `"generate"` media first), `--frame <seconds> --frame-out <png>` renders one frame, and
 `--formats 9:16,1:1,16:9` with `--export` writes one file per shape, `--beats <file>`
-prints a file's tempo, beats, bars and accents, and `--scenes <file>` prints its scene index
-(add `--describe` to have the vision model describe each shot). `MONTAGE_BRAND_JSON`
+prints a file's tempo, beats, bars and accents, `--scenes <file>` prints its scene index
+(add `--describe` to have the vision model describe each shot), `--transcript <file>` prints
+what's said with its fillers, pauses and cuts, and `--clean-speech` cuts the ums and long pauses
+from the loaded project before saving or exporting. `MONTAGE_BRAND_JSON`
 overrides the saved brand kit for a scripted run.
 
 Talk to the assistant without the UI (`--profile` picks the model):
@@ -272,6 +287,7 @@ build/plan_test
 | `src/ai/PlanGuards.*`, `AdStyles.*`, `Brand.*` | Deterministic guards, ad style designer, brand kit | - |
 | `src/ai/Generators.*`, `scripts/generate/` | Generated images, voiceovers and music (ComfyUI, Kokoro, ACE-Step) | - |
 | `src/engine/Animation.*`, `Effects.mm`, `Reframe.mm` | Motions and keyframes, Core Image effects and cutout, Auto Reframe (Vision) | VE effect / animation modules |
+| `src/engine/TextEdit.*`, `qml/TranscriptPanel.qml` | Cutting by words: fillers, pauses, jump-cut groups, transcript panel | Premiere's text-based editing |
 | `src/engine/Scenes.*`, `src/ai/MediaIndexer.*` | Scene index: shots, quality, Vision labels, vision-model descriptions | CapCut's smart scene / highlight features |
 | `src/engine/Beats.*`, `Speech.*`, `src/ai/Finishing.*` | Beat tracking and cut-to-the-beat, speech spans and ducking, whisper.cpp captions | CapCut's beat / auto-caption features |
 | `src/app/Agent.*` | Agent loop, guided planner, chat transcript, model profiles | - |
@@ -283,8 +299,9 @@ build/plan_test
   compositing to Qt RHI shaders would put all of it on Metal the way CapCut's AGFX layer does.
 - Decoding is software (multithreaded). FFmpeg's VideoToolbox hwaccel would cut CPU use for 4K.
 - HDR (HLG/PQ) sources are shown without tone mapping.
-- Not built yet: audio waveforms, proxies, generated video clips, cutting by transcript
-  (text-based editing).
+- Not built yet: audio waveforms, proxies, generated video clips.
+- Text-based editing works on main-track clips and voiceovers at normal speed; word times come
+  from whisper and are usually within a frame or two of the sound.
 - Auto Reframe analyses a clip the first time it is drawn (a fraction of a second per clip).
 - The scene index describes one frame per shot (the best stretch's middle), so action inside a
   long shot isn't described beat by beat; a 20-minute file takes a few minutes to describe.

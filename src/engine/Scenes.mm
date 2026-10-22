@@ -2,6 +2,7 @@
 
 #include "VideoDecoder.h"
 
+#include <QColor>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -26,7 +27,7 @@ namespace mtg {
 
 namespace {
 
-constexpr int kVersion = 1;
+constexpr int kVersion = 2;  // 2: colour labels
 constexpr qint64 kSample = 200'000;  // 5 samples a second
 constexpr int kWidth = 192;          // analysis width
 constexpr qint64 kMinShot = 600'000;
@@ -103,6 +104,7 @@ void store(const Material &m, const SceneIndex &x)
 
 struct Sample {
     std::vector<float> hist;  // 3 x 16 bins, normalised
+    std::vector<float> hues;  // 8 named hues + dark, gray, white: share of the frame
     std::vector<uint8_t> gray;
     int w = 0, h = 0;
     double sharp = 0;      // variance of the Laplacian
@@ -118,6 +120,7 @@ Sample measure(const QImage &frame)
     s.w = img.width();
     s.h = img.height();
     s.hist.assign(48, 0);
+    s.hues.assign(11, 0);
     s.gray.resize(size_t(s.w) * size_t(s.h));
     double sum = 0;
     int clipped = 0;
@@ -128,6 +131,23 @@ Sample measure(const QImage &frame)
             s.hist[size_t(r >> 4)] += 1;
             s.hist[size_t(16 + (g >> 4))] += 1;
             s.hist[size_t(32 + (b >> 4))] += 1;
+            // Named colour of this pixel: red, orange, yellow, green, teal, blue, purple, pink, dark, gray, white.
+            {
+                const int mx = std::max({r, g, b}), mn = std::min({r, g, b});
+                const double v = mx / 255.0, sat = mx ? double(mx - mn) / mx : 0;
+                int bin;
+                if (v < 0.18) bin = 8;
+                else if (sat < 0.2) bin = v > 0.85 ? 10 : 9;
+                else {
+                    double h = 0;
+                    if (mx == r) h = 60.0 * std::fmod(double(g - b) / (mx - mn), 6.0);
+                    else if (mx == g) h = 60.0 * (double(b - r) / (mx - mn) + 2);
+                    else h = 60.0 * (double(r - g) / (mx - mn) + 4);
+                    if (h < 0) h += 360;
+                    bin = h < 15 || h >= 345 ? 0 : h < 40 ? 1 : h < 70 ? 2 : h < 150 ? 3 : h < 190 ? 4 : h < 250 ? 5 : h < 290 ? 6 : 7;
+                }
+                s.hues[size_t(bin)] += 1;
+            }
             const int l = (r * 77 + g * 150 + b * 29) >> 8;
             s.gray[size_t(y) * size_t(s.w) + size_t(x)] = uint8_t(l);
             sum += l;
@@ -136,6 +156,7 @@ Sample measure(const QImage &frame)
     }
     const double n = double(s.w) * s.h;
     for (float &v : s.hist) v = float(v / n);
+    for (float &v : s.hues) v = float(v / n);
     // Sharpness: variance of the 4-neighbour Laplacian.
     double ls = 0, ls2 = 0;
     int ln = 0;
@@ -175,6 +196,21 @@ void shiftBetween(const Sample &a, Sample &b)
     b.dx = bx;
     b.dy = by;
     b.residual = count > 0 ? best / count : 0;
+}
+
+// The colours that fill a frame, as plain words ("orange", "green"), so
+// shots can be found by colour whatever a model calls them: the biggest one,
+// and a second if it covers a good part of the picture.
+QStringList colourNames(const Sample &s)
+{
+    static const char *names[] = {"red", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "dark", "gray", "white"};
+    QList<QPair<float, int>> order;
+    for (int i = 0; i < int(s.hues.size()); ++i) order.append({s.hues[size_t(i)], i});
+    std::sort(order.begin(), order.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    QStringList out;
+    if (!order.isEmpty() && order[0].first > 0.15) out << QLatin1String(names[order[0].second]);
+    if (order.size() > 1 && order[1].first > 0.2) out << QLatin1String(names[order[1].second]);
+    return out;
 }
 
 double histDistance(const Sample &a, const Sample &b)
@@ -238,6 +274,7 @@ SceneIndex analyseImage(const Material &m)
     if (img.isNull()) return x;
     const Sample s = measure(img.scaledToWidth(kWidth, Qt::SmoothTransformation));
     Shot shot;
+    shot.tags += colourNames(s);
     shot.sharpness = sharpScore(s.sharp);
     shot.exposure = s.exposure;
     shot.stability = 1;
@@ -326,6 +363,10 @@ SceneIndex analyseVideo(const Material &m)
             const double steady = std::clamp(1 - ((ln ? local / ln : 0) - 1.0) / 5.0, 0.0, 1.0);
             shot.quality << float(std::pow(sharpScore(samples[i].sharp), 0.7) * samples[i].exposure * (0.4 + 0.6 * steady));
         }
+        // Colour of the frame that represents the shot (the one a vision model describes).
+        const auto rep = shot.bestWindow(std::min<qint64>(2'000'000, shot.length()));
+        const size_t mid = std::clamp<size_t>(a + size_t(((rep.first + rep.second) / 2 - shot.start) / kSample), a, b - 1);
+        shot.tags += colourNames(samples[mid]);
         x.shots << shot;
     }
 

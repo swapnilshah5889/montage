@@ -47,7 +47,11 @@ struct PlanReport {
 // on a beach (wide, best); 2) ..."), or empty when it hasn't been built.
 QString describeShots(const Material &m);
 
-// One line per media file: id, kind, name, length, size, sound, plus its shots.
+// What's said in a file as numbered lines ("    says: 1) 0-2s \"Hi, I'm
+// Sam.\"; ..."), or empty when it hasn't been transcribed or nobody speaks.
+QString describeSpeech(const Material &m);
+
+// One line per media file: id, kind, name, length, size, sound, plus its shots and lines.
 QString describeMedia(const Draft &d, const MediaIndex &index);
 
 // Compact human-readable timeline summary (what the model gets back after an edit).
@@ -71,6 +75,11 @@ QStringList exportFormatNames();  // 9:16, 4:5, 1:1, 16:9
 
 // JSON Schema for plans; portable across Anthropic, OpenAI and Ollama.
 QJsonObject planSchema();
+
+// How long a "main" item plays on the timeline, in seconds: its range over
+// its speed, a freeze frame's "duration", less any "skips". NaN if the
+// range is broken.
+double itemSeconds(const QJsonObject &item);
 
 // Parses "12", "12.5", "1:30" or a JSON number into seconds; NaN if invalid.
 double seconds(const QJsonValue &v);

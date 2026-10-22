@@ -56,14 +56,8 @@ QList<double> mainLengths(const QJsonArray &main)
 {
     QList<double> out;
     for (const QJsonValue &v : main) {
-        const QJsonObject o = v.toObject();
-        const double speed = o.contains("speed") ? num(o.value("speed"), 1) : 1;
-        if (speed == 0) {
-            out << num(o.value("duration"), 2);
-            continue;
-        }
-        const double f = num(o.value("from"), 0), t = num(o.value("to"), f + 3);
-        out << std::max(0.1, (t - f) / std::max(0.1, speed));
+        const double s = itemSeconds(v.toObject());
+        out << (std::isnan(s) ? 3 : std::max(0.1, s));
     }
     return out;
 }

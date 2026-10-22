@@ -1,0 +1,152 @@
+{
+  "about": "Text-based editing eval: cutting and arranging by what's said. talk.mp4 says \"Hi, I'm Sam. Um, our bread is, uh, baked fresh every morning. <1.5 s> We use only organic flour. Uh, and honestly, um, it tastes amazing. <1.2 s> Order online today and get free delivery.\" Needs tests/make_media.sh (macOS say) and whisper.cpp. Run: Montage --eval tests/eval/transcript.json --media tests/media --profile <id>",
+  "cases": [
+    {
+      "name": "remove-ums",
+      "media": [
+        "talk.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 18.4
+          }
+        ]
+      },
+      "requests": [
+        "Remove the ums and the long pauses"
+      ],
+      "checks": [
+        {
+          "type": "no_fillers"
+        },
+        {
+          "type": "says",
+          "text": "organic flour"
+        },
+        {
+          "type": "says",
+          "text": "free delivery"
+        },
+        {
+          "type": "length",
+          "min": 8,
+          "max": 13.5
+        }
+      ]
+    },
+    {
+      "name": "one-line",
+      "media": [
+        "talk.mp4"
+      ],
+      "requests": [
+        "Make a short clip of just the line about organic flour"
+      ],
+      "checks": [
+        {
+          "type": "says",
+          "text": "organic flour"
+        },
+        {
+          "type": "not_says",
+          "text": "bread"
+        },
+        {
+          "type": "not_says",
+          "text": "delivery"
+        },
+        {
+          "type": "length",
+          "min": 1,
+          "max": 3
+        }
+      ]
+    },
+    {
+      "name": "reorder",
+      "media": [
+        "talk.mp4"
+      ],
+      "requests": [
+        "Make a clip that starts with the free delivery line, then the line about our bread"
+      ],
+      "checks": [
+        {
+          "type": "says_order",
+          "phrases": [
+            "free delivery",
+            "bread"
+          ]
+        },
+        {
+          "type": "length",
+          "min": 3,
+          "max": 10
+        }
+      ]
+    },
+    {
+      "name": "cut-name",
+      "media": [
+        "talk.mp4"
+      ],
+      "setup": {
+        "main": [
+          {
+            "media": "m1",
+            "from": 0,
+            "to": 18.4
+          }
+        ]
+      },
+      "requests": [
+        "Cut the part where I say my name"
+      ],
+      "checks": [
+        {
+          "type": "not_says",
+          "text": "sam"
+        },
+        {
+          "type": "says",
+          "text": "bread"
+        },
+        {
+          "type": "says",
+          "text": "free delivery"
+        }
+      ]
+    },
+    {
+      "name": "testimonial",
+      "media": [
+        "talk.mp4",
+        "beat.mp3"
+      ],
+      "requests": [
+        "Make a short ad from this testimonial with the music quietly underneath, and cut the ums"
+      ],
+      "checks": [
+        {
+          "type": "no_fillers"
+        },
+        {
+          "type": "audio",
+          "media": "beat.mp3"
+        },
+        {
+          "type": "main_count",
+          "min": 1
+        },
+        {
+          "type": "length",
+          "min": 3,
+          "max": 16
+        }
+      ]
+    }
+  ]
+}

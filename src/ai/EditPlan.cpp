@@ -5,6 +5,8 @@
 #include "engine/Animation.h"
 #include "engine/Beats.h"
 #include "engine/Scenes.h"
+#include "engine/Speech.h"
+#include "engine/TextEdit.h"
 #include "engine/Effects.h"
 
 #include <QColor>
@@ -249,6 +251,23 @@ QString describeShots(const Material &m)
     return QStringLiteral("    shots: ") + parts.join(QStringLiteral("; "));
 }
 
+QString describeSpeech(const Material &m)
+{
+    if (!m.hasAudio || m.kind == MaterialKind::Text) return {};
+    const Transcript t = cachedFileTranscript(m);
+    if (!t.done) return {};
+    const QList<Line> said = transcriptLines(t);
+    if (said.isEmpty()) return {};
+    QStringList parts;
+    for (qsizetype i = 0; i < said.size() && i < 15; ++i) {
+        QString text = said[i].text;
+        if (text.size() > 90) text = text.left(87) + QStringLiteral("...");
+        parts << QStringLiteral("%1) %2-%3s \"%4\"").arg(i + 1).arg(fmt(secs(said[i].start)), fmt(secs(said[i].end)), text);
+    }
+    if (said.size() > 15) parts << QStringLiteral("(+%1 more lines)").arg(said.size() - 15);
+    return QStringLiteral("    says: ") + parts.join(QStringLiteral("; "));
+}
+
 QString describeMedia(const Draft &d, const MediaIndex &index)
 {
     QStringList lines;
@@ -260,6 +279,7 @@ QString describeMedia(const Draft &d, const MediaIndex &index)
         if (m->kind == MaterialKind::Video) line += m->hasAudio ? QStringLiteral("  sound") : QStringLiteral("  no-sound");
         lines << line;
         if (const QString shots = describeShots(*m); !shots.isEmpty()) lines << shots;
+        if (const QString said = describeSpeech(*m); !said.isEmpty()) lines << said;
     }
     return lines.isEmpty() ? QStringLiteral("(no media imported yet)") : lines.join('\n');
 }
@@ -378,6 +398,8 @@ static QJsonObject textItem(const Segment &s)
 QJsonObject planFromDraft(const Draft &d, const MediaIndex &index)
 {
     QJsonArray main, overlays, audio, texts, moments;
+    QString lastGroup, lastMaterial;  // for folding jump-cut pieces into one item
+    qint64 lastEnd = -1;
     for (const Track &t : d.tracks) {
         for (const Segment &s : t.segments) {
             const Material *m = d.material(s.materialId);
@@ -413,7 +435,21 @@ QJsonObject planFromDraft(const Draft &d, const MediaIndex &index)
                 }
                 if (s.framing != QLatin1String("auto")) o.insert("framing", s.framing);
                 if (s.speech) o.insert("speech", true);
-                main.append(o);
+                // Jump-cut pieces of one clip (text-based edits) are one item with "skips".
+                if (!s.group.isEmpty() && s.group == lastGroup && s.materialId == lastMaterial && s.sourceStart >= lastEnd - 1000) {
+                    QJsonObject merged = main.last().toObject();
+                    QJsonArray skips = merged.value("skips").toArray();
+                    skips.append(QJsonArray{num(secs(lastEnd)), num(secs(s.sourceStart))});
+                    merged.insert("skips", skips);
+                    merged.insert("to", num(to));
+                    if (o.contains("out")) merged.insert("out", o.value("out"));
+                    main[main.size() - 1] = merged;
+                } else {
+                    main.append(o);
+                }
+                lastGroup = s.group;
+                lastMaterial = s.materialId;
+                lastEnd = s.sourceStart + s.sourceSpan();
             } else if (t.role == TrackRole::Overlay) {
                 o.insert("at", num(secs(s.start)));
                 QString anchor = QStringLiteral("custom");
@@ -456,6 +492,7 @@ QJsonObject planFromDraft(const Draft &d, const MediaIndex &index)
     if (!d.style.isEmpty()) plan.insert("style", d.style);
     if (!d.beatSync.isEmpty()) plan.insert("beat_sync", d.beatSync);
     if (!d.captions.isEmpty()) plan.insert("captions", d.captions);
+    if (d.cleanSpeech) plan.insert("clean_speech", true);
     return plan;
 }
 
@@ -729,6 +766,7 @@ Draft draftFromPlan(const Draft &current, const QJsonObject &plan, const MediaIn
         else if (mode == QLatin1String("bar")) out.beatSync = QStringLiteral("bars");
         else out.beatSync.clear();  // "off", "none", ""
     }
+    if (plan.contains("clean_speech")) out.cleanSpeech = plan.value("clean_speech").toBool();
     if (plan.contains("captions")) {
         const QString style = plan.value("captions").toString().trimmed().toLower();
         if (textPresetNames().contains(style)) out.captions = style;
@@ -807,6 +845,19 @@ Draft draftFromPlan(const Draft &current, const QJsonObject &plan, const MediaIn
             const QString f = item.value("framing").toString().trimmed().toLower();
             if (framingNames().contains(f)) s.framing = f;
             else report->warnings << QStringLiteral("%1: unknown framing \"%2\"; use one of %3.").arg(where, f, framingNames().join(", "));
+        }
+        const QJsonArray skips = item.value("skips").toArray();
+        if (!skips.isEmpty() && m->isTimed() && s.speed > 0) {  // a clip with words taken out: jump-cut pieces
+            QList<Range> ranges;
+            for (const QJsonValue &v : skips) {
+                const double a = seconds(v.toArray().at(0)), z = seconds(v.toArray().at(1));
+                if (!std::isnan(a) && !std::isnan(z) && z > a) ranges << Range{toUs(a), toUs(z)};
+            }
+            for (const Segment &piece : splitBySkips(s, ranges)) {
+                out.tracks[0].segments.append(piece);
+                cursor += piece.duration;
+            }
+            continue;
         }
         out.tracks[0].segments.append(s);
         cursor += s.duration;
@@ -1013,6 +1064,10 @@ QJsonObject planSchema()
                                            {"transition", choice(transitionNames() << "none")}, {"transition_duration", number()},
                                            {"framing", choice(framingNames())}, {"speech", QJsonObject{{"type", "boolean"}}},
                                            {"shot", QJsonObject{{"type", "integer"}}}, {"moment", string()},
+                                           {"line", QJsonObject{{"type", "integer"}}}, {"says", string()},
+                                           {"lines", array(QJsonObject{{"type", "integer"}})},
+                                           {"cut_lines", array(QJsonObject{{"type", "integer"}})},
+                                           {"skips", array(array(number()))},
                                            {"speed", number()}, {"speed_curve", choice(speedCurveNames())}, {"duration", number()}}),
                                  {"media", "from", "to"});
     const QJsonObject overlay = obj(animated({{"media", string()}, {"at", number()}, {"from", number()}, {"to", number()},
@@ -1047,6 +1102,7 @@ QJsonObject planSchema()
                 {"background", string()},
                 {"style", choice(adStyleNames() << "none")},
                 {"beat_sync", choice(beatSyncNames() << "off")},
+                {"clean_speech", QJsonObject{{"type", "boolean"}}},
                 {"captions", choice(textPresetNames() << "none")},
                 {"moments", array(obj({{"effect", choice(momentNames() + effectNames())}, {"at", number()},
                                        {"duration", number()}, {"amount", number()}},
@@ -1070,6 +1126,24 @@ Draft resizedDraft(const Draft &d, const QString &aspect)
 QStringList exportFormatNames()
 {
     return {"9:16", "4:5", "1:1", "16:9"};
+}
+
+double itemSeconds(const QJsonObject &o)
+{
+    double speed = o.contains("speed") ? seconds(o.value("speed")) : 1;
+    if (speed == 0) {
+        const double d = seconds(o.value("duration"));
+        return std::isnan(d) ? 2 : d;
+    }
+    if (std::isnan(speed) || speed < 0) speed = 1;
+    const double f = seconds(o.value("from")), t = seconds(o.value("to"));
+    if (std::isnan(f) || std::isnan(t)) return std::numeric_limits<double>::quiet_NaN();
+    double span = std::max(0.0, t - f);
+    for (const QJsonValue &v : o.value("skips").toArray()) {
+        const double a = seconds(v.toArray().at(0)), b = seconds(v.toArray().at(1));
+        if (!std::isnan(a) && !std::isnan(b) && b > a) span -= std::min(b, t) - std::max(a, f) > 0 ? std::min(b, t) - std::max(a, f) : 0;
+    }
+    return std::max(0.0, span) / std::max(0.1, speed);
 }
 
 }  // namespace mtg::ai

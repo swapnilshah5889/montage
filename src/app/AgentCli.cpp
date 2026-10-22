@@ -1,4 +1,5 @@
 #include "engine/Beats.h"
+#include "engine/TextEdit.h"
 #include "AgentCli.h"
 
 #include "Agent.h"
@@ -269,6 +270,31 @@ QString check(const QJsonObject &c, const Ctx &x)
                 if (mediaName(x.d, s) == name && (!s.motion.in.isEmpty() || !s.motion.out.isEmpty() || !s.motion.loop.isEmpty() || !s.keys.isEmpty()))
                     return {};
         return name + QStringLiteral(" doesn't move");
+    }
+    if (type == QLatin1String("says") || type == QLatin1String("not_says") || type == QLatin1String("says_order") || type == QLatin1String("no_fillers")) {
+        // What the edited main track actually says, from the clips' transcripts.
+        QStringList words;
+        int fillers = 0;
+        for (const TimelineWord &w : timelineWords(x.d)) {
+            words << w.text.toLower();
+            fillers += w.filler;
+        }
+        const QString said = words.join(QLatin1Char(' '));
+        if (type == QLatin1String("no_fillers")) return fillers ? QStringLiteral("%1 fillers left: \"%2\"").arg(fillers).arg(said.left(120)) : QString();
+        if (type == QLatin1String("says_order")) {
+            int last = -1;
+            for (const QJsonValue &v : c.value("phrases").toArray()) {
+                const int at = int(said.indexOf(v.toString().toLower()));
+                if (at < 0) return QStringLiteral("doesn't say \"%1\": \"%2\"").arg(v.toString(), said.left(120));
+                if (at < last) return QStringLiteral("\"%1\" comes too early: \"%2\"").arg(v.toString(), said.left(120));
+                last = at;
+            }
+            return {};
+        }
+        const QString want = c.value("text").toString().toLower();
+        const bool has = said.contains(want);
+        if (type == QLatin1String("says")) return has ? QString() : QStringLiteral("doesn't say \"%1\": \"%2\"").arg(want, said.left(120));
+        return has ? QStringLiteral("still says \"%1\"").arg(want) : QString();
     }
     if (type == QLatin1String("main_within")) {  // every main clip of this media lies inside one of `ranges` (seconds in the file)
         const QString name = c.value("media").toString();

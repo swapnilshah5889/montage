@@ -1324,6 +1324,64 @@ static void sceneTests()
     CHECK(x.shots[0].bestWindow(1'000'000).first >= 1'000'000);  // inside the best-quality stretch
 }
 
+static void textPlanTests()
+{
+    Draft d = sampleDraft();  // m1 beach 12s with sound
+    d.materials[0].path = "/nowhere/interview.mp4";
+    const MediaIndex index(d);
+    Transcript t;
+    auto add = [&](double a, double b, const char *w) { t.words << Word{qint64(a * 1e6), qint64(b * 1e6), w}; };
+    add(0.2, 0.5, "Hi,"); add(0.6, 0.9, "I'm"); add(1.0, 1.4, "Sam.");
+    add(2.0, 2.3, "Um,"); add(2.5, 2.8, "our"); add(2.9, 3.2, "bread"); add(3.3, 3.6, "is"); add(3.7, 4.2, "fresh.");
+    add(6.0, 6.3, "Order"); add(6.4, 6.8, "online"); add(6.9, 7.5, "today.");
+    putTranscript(d.materials[0], t);
+
+    CHECK(describeSpeech(d.materials[0]).contains("3) 6-7.50s \"Order online today.\""));
+    CHECK(describeMedia(d, index).contains("says: 1) 0.20-1.40s \"Hi, I'm Sam.\""));
+
+    // "line" and "says" become exact ranges; "cut_lines" becomes skips.
+    QJsonObject plan = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "line": 3, "from": 0, "to": 1},
+        {"media": "m1", "says": "our bread is fresh", "from": 0, "to": 1}, {"media": "m1", "from": 0, "to": 12, "cut_lines": [1]}]})").object();
+    CHECK(resolveLines(d, index, &plan).size() == 3);
+    const QJsonArray m = plan.value("main").toArray();
+    CHECK(std::abs(m[0].toObject().value("from").toDouble() - 5.94) < 0.01 && std::abs(m[0].toObject().value("to").toDouble() - 7.65) < 0.01);
+    CHECK(m[1].toObject().value("from").toDouble() < 2.1 && m[1].toObject().value("to").toDouble() > 4.2);
+    CHECK(m[2].toObject().value("skips").toArray().size() == 1 && std::abs(itemSeconds(m[2].toObject()) - (12 - 1.41)) < 0.05);
+
+    // Skips build jump-cut pieces and fold back into one item.
+    PlanReport r;
+    const Draft built = draftFromPlan(d, plan, index, &r);
+    CHECK(r.ok() && built.tracks[0].segments.size() == 4);  // two lines, then the clip in two pieces
+    const QJsonObject back = planFromDraft(built, MediaIndex(built));
+    CHECK(back.value("main").toArray().size() == 3 && back.value("main").toArray()[2].toObject().value("skips").toArray().size() == 1);
+    CHECK(std::abs(built.duration() / 1e6 - (1.71 + itemSeconds(m[1].toObject()) + 12 - 1.41)) < 0.06);
+
+    // Requests: clean speech, and cutting a line by what it says.
+    QJsonObject whole = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 12}]})").object();
+    CHECK(!applySpeechRequests("remove the ums and tighten the pauses", d, index, &whole).isEmpty() && whole.value("clean_speech").toBool());
+    QJsonObject noName = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 12}]})").object();
+    CHECK(!applySpeechRequests("cut the part where I say my name", d, index, &noName).isEmpty());
+    CHECK(noName.value("main").toArray()[0].toObject().value("skips").toArray().size() == 1);
+    QJsonObject bread = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 12}]})").object();
+    applySpeechRequests("remove the line about bread", d, index, &bread);
+    CHECK(bread.value("main").toArray()[0].toObject().value("skips").toArray()[0].toArray()[0].toDouble() < 2.6);
+
+    // "Remove the ums" never removes lines; an arrangement of named lines is built as asked.
+    QJsonObject cutByMistake = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 12, "cut_lines": [2]}]})").object();
+    CHECK(arrangeLines("remove the ums", d, index, &cutByMistake).contains("kept every line"));
+    CHECK(!cutByMistake.value("main").toArray()[0].toObject().contains("cut_lines"));
+    QJsonObject order = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 5}]})").object();
+    CHECK(arrangeLines("start with the line about ordering online, then the bread line", d, index, &order).size() == 1);
+    const QJsonArray arranged = order.value("main").toArray();
+    CHECK(arranged.size() == 2 && arranged[0].toObject().value("from").toDouble() > 5.9 && arranged[1].toObject().value("from").toDouble() < 2.1);
+
+    // Named lines the plan skipped.
+    const QJsonObject first = QJsonDocument::fromJson(R"({"main": [{"media": "m1", "from": 0, "to": 1.5}]})").object();
+    const QStringList miss = missingLines("start with the line about ordering online", first, d, index);
+    CHECK(miss.size() == 1 && miss[0].contains("\"line\": 3"));
+    CHECK(missingLines("make it vertical", first, d, index).isEmpty());
+}
+
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
@@ -1334,6 +1392,7 @@ int main(int argc, char **argv)
     brandTests();
     smartTests();
     sceneTests();
+    textPlanTests();
     generationTests();
     anthropicTests();
     openAiTests();

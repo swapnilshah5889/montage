@@ -31,6 +31,7 @@ add_library(montage_engine STATIC
     src/engine/Beats.h src/engine/Beats.cpp
     src/engine/Speech.h src/engine/Speech.cpp
     src/engine/Scenes.h src/engine/Scenes.mm
+    src/engine/TextEdit.h src/engine/TextEdit.cpp
     src/engine/Renderer.h src/engine/Renderer.cpp
     src/engine/PreviewEngine.h src/engine/PreviewEngine.cpp
     src/engine/ExportJob.h src/engine/ExportJob.cpp
@@ -84,6 +85,7 @@ qt_add_qml_module(Montage
         qml/ChatPanel.qml
         qml/ModelSettings.qml
         qml/BrandSettings.qml
+        qml/TranscriptPanel.qml
     SOURCES
         src/app/Agent.h src/app/Agent.cpp
         src/app/Project.h src/app/Project.cpp

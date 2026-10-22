@@ -32,6 +32,8 @@ class Project : public QObject
     Q_PROPERTY(QVariantMap selection READ selection NOTIFY selectionChanged)
     Q_PROPERTY(QString beatSync READ beatSync NOTIFY changed)
     Q_PROPERTY(bool captioning READ captioning NOTIFY captioningChanged)
+    // What's said on the main track, word by word, for the transcript panel.
+    Q_PROPERTY(QVariantList transcript READ transcript NOTIFY changed)
 
 public:
     // Not default-constructible on purpose: QML would otherwise build its
@@ -111,6 +113,13 @@ public:
     bool captioning() const { return m_captioning; }
     Q_INVOKABLE void autoCaptions(const QString &style);
     Q_INVOKABLE void clearCaptions();
+
+    // Text-based editing.
+    QVariantList transcript() const;
+    // Cuts [start, end) out of the main track (words selected in the transcript).
+    Q_INVOKABLE void cutRange(qint64 start, qint64 end);
+    // Cuts fillers (um, uh) and/or long pauses from every talking clip.
+    Q_INVOKABLE void cleanSpeechNow(bool fillers, bool pauses);
     Q_INVOKABLE QStringList transitionNames() const;
 
     // Speed keeps the clip's source footage and changes its length (faster =

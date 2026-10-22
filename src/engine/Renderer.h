@@ -67,6 +67,7 @@ private:
     quint64 m_tick = 0;
     std::unique_ptr<EffectProcessor> m_fx;  // created on first use
     std::vector<float> m_resample;          // scratch for time-remapped audio
+    std::vector<float> m_scratch;           // one clip's audio near its edges, before fading
     QList<QPair<qint64, qint64>> m_speech;  // timeline spans where someone talks (for ducking)
     bool m_speechReady = false;
 };

@@ -73,6 +73,28 @@ QStringList applyNamedShots(const QString &request, const Draft &d, const MediaI
 // laughs") that the plan doesn't use, as instructions with the shot to add.
 QStringList missingShots(const QString &request, const QJsonObject &plan, const Draft &d, const MediaIndex &index);
 
+// Speech references: main and overlay items with "line": N, "lines": [a, b]
+// or "says": "words" get "from"/"to" set to exactly that stretch of speech
+// (from the file's numbered lines); "cut_lines": [N, ...] takes those lines
+// out of the item as "skips". Returns a note per item resolved.
+QStringList resolveLines(const Draft &d, const MediaIndex &index, QJsonObject *plan);
+
+// Speech edits the request asks for directly: "remove the ums / tighten the
+// pauses" sets "clean_speech"; "cut the part where I say X" takes that line
+// out of the clip that contains it. Returns notes.
+QStringList applySpeechRequests(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan);
+
+// Guards for edits by what's said, before "line"/"cut_lines" are resolved:
+// lines the model cut when the request only asked to remove ums and pauses
+// are kept; and a request that arranges lines ("start with the free delivery
+// line, then the one about our bread") gets exactly those lines, in that
+// order, when each part names one line clearly. Returns notes.
+QStringList arrangeLines(const QString &request, const Draft &d, const MediaIndex &index, QJsonObject *plan);
+
+// Lines the request quotes or names ("the line about free delivery") that
+// the plan doesn't use, as instructions naming the line to add.
+QStringList missingLines(const QString &request, const QJsonObject &plan, const Draft &d, const MediaIndex &index);
+
 // Shapes to export when the request asks for several platforms at once
 // ("export it for TikTok and YouTube", "all formats"); empty otherwise.
 QStringList requestedFormats(const QString &request);

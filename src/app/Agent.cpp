@@ -713,6 +713,9 @@ void Agent::buildPlan(const QJsonObject &modelPlan, QJsonObject plan, QStringLis
         notes << QStringLiteral("set the background to %1").arg(bg);
     }
     notes += resolveShots(current, index, &plan);  // "shot": 2 / "moment": "the dog" -> exact ranges
+    notes += arrangeLines(m_request, current, index, &plan);
+    notes += resolveLines(current, index, &plan);  // "line": 3 / "says": "free delivery" -> that sentence
+    notes += applySpeechRequests(m_request, current, index, &plan);
     notes += applyNamedShots(m_request, current, index, &plan);
     const double wanted = requestedLength(m_request);
     if (wanted > 0 && fitToLength(wanted, current, index, &plan))
@@ -956,5 +959,6 @@ QString Agent::planFeedback(const QJsonObject &current, const QJsonObject &plan,
     }
     problems += missingFeatures(m_request, plan);
     problems += missingShots(m_request, plan, d, index);
+    problems += missingLines(m_request, plan, d, index);
     return problems.join('\n');
 }

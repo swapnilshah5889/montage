@@ -293,11 +293,24 @@ int snapCutsToBeats(Draft &d, const QString &musicId, const QString &mode)
     QList<qint64> oldCuts, newCuts;
     for (qsizetype i = 1; i < main.size(); ++i) oldCuts << main[i].start;
     qint64 prev = 0;
+    // Jump cuts inside one clip (text-based edits: pieces sharing a group) stay where they are.
+    auto internal = [&](qsizetype k) { return !main[k + 1].group.isEmpty() && main[k + 1].group == main[k].group; };
     for (qsizetype k = 0; k < oldCuts.size(); ++k) {
+        if (internal(k)) {
+            newCuts << oldCuts[k];
+            prev = oldCuts[k];
+            continue;
+        }
+        qint64 nextFixed = total;
+        for (qsizetype j = k + 1; j < oldCuts.size(); ++j)
+            if (internal(j)) {
+                nextFixed = oldCuts[j];
+                break;
+            }
         const qint64 remaining = (oldCuts.size() - k) * minLen;  // room for the clips after this cut
         qint64 best = -1;
         for (qint64 b : beats) {
-            if (b < prev + minLen || b > total - remaining) continue;
+            if (b < prev + minLen || b > total - remaining || b > nextFixed - minLen) continue;
             if (best < 0 || std::abs(b - oldCuts[k]) < std::abs(best - oldCuts[k])) best = b;
         }
         // Don't drag a cut further than a bar from where the editor put it.
